@@ -52,6 +52,19 @@ DARK_BUTTON_HOVER = "#4e5254"
 DARK_TREEVIEW = "#3c3f41"
 DARK_TREEVIEW_ALT = "#404040"
 
+RADAR_SETTINGS_LIMITS = {
+    'system_frequency': (1e9, 100e9),
+    'chirp_duration_1': (1e-6, 1000e-6),
+    'chirp_duration_2': (0.1e-6, 10e-6),
+    'chirps_per_position': (1, 256),
+    'freq_min': (1e6, 100e6),
+    'freq_max': (1e6, 100e6),
+    'prf1': (100, 10000),
+    'prf2': (100, 10000),
+    'max_distance': (100, 100000),
+    'map_size': (1000, 200000),
+}
+
 @dataclass
 class RadarTarget:
     id: int
@@ -1155,6 +1168,38 @@ class RadarGUI:
         
         ttk.Button(settings_frame, text="Apply Settings", 
                   command=self.apply_settings).grid(row=len(entries), column=0, columnspan=2, pady=10)
+
+    def _parse_settings_from_form(self):
+        """Read settings from the UI and return a validated RadarSettings instance."""
+        parsed_settings = RadarSettings(
+            system_frequency=float(self.settings_vars['system_frequency'].get()),
+            chirp_duration_1=float(self.settings_vars['chirp_duration_1'].get()),
+            chirp_duration_2=float(self.settings_vars['chirp_duration_2'].get()),
+            chirps_per_position=int(self.settings_vars['chirps_per_position'].get()),
+            freq_min=float(self.settings_vars['freq_min'].get()),
+            freq_max=float(self.settings_vars['freq_max'].get()),
+            prf1=float(self.settings_vars['prf1'].get()),
+            prf2=float(self.settings_vars['prf2'].get()),
+            max_distance=float(self.settings_vars['max_distance'].get()),
+            map_size=float(self.settings_vars['map_size'].get()),
+        )
+
+        self._validate_radar_settings(parsed_settings)
+        return parsed_settings
+
+    def _validate_radar_settings(self, settings):
+        """Mirror the firmware-side range checks before sending settings to STM32."""
+        for field_name, (minimum, maximum) in RADAR_SETTINGS_LIMITS.items():
+            value = getattr(settings, field_name)
+            if value < minimum or value > maximum:
+                raise ValueError(
+                    f"{field_name} must be between {minimum:g} and {maximum:g}."
+                )
+
+        if settings.freq_max <= settings.freq_min:
+            raise ValueError("freq_max must be greater than freq_min.")
+
+        return True
     
     def apply_pitch_correction(self, raw_elevation, pitch_angle):
         """
@@ -1265,24 +1310,23 @@ class RadarGUI:
     def apply_settings(self):
         """Step 13: Apply and send radar settings via USB"""
         try:
-            self.settings.system_frequency = float(self.settings_vars['system_frequency'].get())
-            self.settings.chirp_duration_1 = float(self.settings_vars['chirp_duration_1'].get())
-            self.settings.chirp_duration_2 = float(self.settings_vars['chirp_duration_2'].get())
-            self.settings.chirps_per_position = int(self.settings_vars['chirps_per_position'].get())
-            self.settings.freq_min = float(self.settings_vars['freq_min'].get())
-            self.settings.freq_max = float(self.settings_vars['freq_max'].get())
-            self.settings.prf1 = float(self.settings_vars['prf1'].get())
-            self.settings.prf2 = float(self.settings_vars['prf2'].get())
-            self.settings.max_distance = float(self.settings_vars['max_distance'].get())
-            self.settings.map_size = float(self.settings_vars['map_size'].get())
+            parsed_settings = self._parse_settings_from_form()
             self.google_maps_api_key = self.settings_vars['google_maps_api_key'].get()
-            
+
+            self.settings = parsed_settings
+
             if self.stm32_usb_interface.is_open:
-                self.stm32_usb_interface.send_settings(self.settings)
-            
-            messagebox.showinfo("Success", "Settings applied and sent to STM32 via USB")
-            logging.info("Radar settings applied via USB")
-            
+                if not self.stm32_usb_interface.send_settings(self.settings):
+                    messagebox.showerror("Error", "Failed to send settings to STM32 via USB")
+                    logging.error("Radar settings validation passed, but USB send failed")
+                    return
+
+                messagebox.showinfo("Success", "Settings applied and sent to STM32 via USB")
+                logging.info("Radar settings applied and sent via USB")
+            else:
+                messagebox.showinfo("Success", "Settings applied locally")
+                logging.info("Radar settings applied locally; STM32 USB is not connected")
+
         except ValueError as e:
             messagebox.showerror("Error", f"Invalid setting value: {e}")
     

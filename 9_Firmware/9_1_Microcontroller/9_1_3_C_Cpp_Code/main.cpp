@@ -620,8 +620,7 @@ SystemError_t checkSystemHealth(void) {
     // 4. Check IMU Communication
     static uint32_t last_imu_check = 0;
     if (HAL_GetTick() - last_imu_check > 10000) {
-        GY85_Update(&imu);
-        if (isnan(imu.ax) || isnan(imu.ay) || isnan(imu.az)) {
+        if (!GY85_Update(&imu)) {
             current_error = ERROR_IMU_COMM;
         }
         last_imu_check = HAL_GetTick();
@@ -1277,9 +1276,13 @@ int main(void)
 
 
 // Initialize module IMU
-  GY85_Init();
+  if (!GY85_Init()) {
+      Error_Handler();
+  }
   for(int i=0; i<10;i++){
-  GY85_Update(&imu);
+  if (!GY85_Update(&imu)) {
+      Error_Handler();
+  }
 
   ax = imu.ax;
   ay = imu.ay;
@@ -1526,9 +1529,12 @@ int main(void)
 
   GPS_Data_t gps_data;
   // Binary packet structure:
-  // [Header 4 bytes][Latitude 8 bytes][Longitude 8 bytes][Altitude 4 bytes][CRC 2 bytes]
+  // [Header 4 bytes][Latitude 8 bytes][Longitude 8 bytes][Altitude 4 bytes][Pitch 4 bytes][CRC 2 bytes]
   gps_data = {RADAR_Latitude, RADAR_Longitude, RADAR_Altitude, Pitch_Sensor, HAL_GetTick()};
-  GPS_SendBinaryToGUI(&gps_data);
+  if (!GPS_SendBinaryToGUI(&gps_data)) {
+      const uint8_t gps_send_error[] = "GPS binary send failed\r\n";
+      HAL_UART_Transmit(&huart3, (uint8_t*)gps_send_error, sizeof(gps_send_error) - 1, 1000);
+  }
 
   // Check if start flag was received and settings are ready
   do{

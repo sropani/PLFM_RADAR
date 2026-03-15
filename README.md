@@ -1,6 +1,7 @@
 # AERIS-10: Open Source Pulse Linear Frequency Modulated Phased Array Radar
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Hardware: CERN-OHL-P](https://img.shields.io/badge/Hardware-CERN--OHL--P-blue.svg)](https://ohwr.org/cern_ohl_p_v2.txt)
+[![Software: MIT](https://img.shields.io/badge/Software-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange)](https://github.com/NawfalMotii79/PLFM_RADAR)
 [![Frequency: 10.5GHz](https://img.shields.io/badge/Frequency-10.5GHz-blue)](https://github.com/NawfalMotii79/PLFM_RADAR))
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/NawfalMotii79/PLFM_RADAR/pulls)
@@ -142,3 +143,41 @@ The AERIS-10 main sub-systems are:
 4. **Antenna**: Choose appropriate array for your version
 5. **Enclosure**: 3D printable files in `/10_docs/Hardware/Enclosure`
 
+## 📜 License
+
+This project is open-source but uses **different licenses for hardware and software** to ensure proper legal coverage.
+
+### Hardware Documentation
+The hardware design files—including:
+- Schematics and PCB layouts (in `/4_Schematics and Boards Layout`)
+- Bill of Materials (BOM) files
+- Gerber files and manufacturing outputs
+- Mechanical drawings and enclosure designs
+
+are licensed under the **CERN Open Hardware Licence Version 2 – Permissive (CERN-OHL-P)** .
+
+This is a hardware-specific license that:
+- ✅ Clearly defines "Hardware," "Documentation," and "Products"
+- ✅ Includes explicit patent protection for contributors and users
+- ✅ Provides stronger liability limitations (important for high-power RF)
+- ✅ Aligns with professional open-hardware standards (CERN, OSHWA)
+
+You may use, modify, and sell products based on these designs, provided you:
+- Maintain the original copyright notices
+- Distribute any modified designs under the same license
+- Make your modifications available in Source format
+
+### Software and Firmware
+The software components—including:
+- FPGA code (VHDL/Verilog in `/9_Firmware`)
+- Microcontroller firmware (STM32)
+- Python GUI and utilities
+
+remain under the **MIT License** for maximum flexibility.
+
+### Full License Texts
+- The complete CERN-OHL-P license text is in the `LICENSE` file
+- MIT license terms apply to software where not otherwise specified
+
+### Why This Change?
+Originally, the entire project used the MIT license. The community (special thanks to [GitHub Username]!) pointed out that MIT lacks legal protections needed for physical hardware. The switch to CERN-OHL-P ensures the project is properly protected while maintaining the same permissive spirit.

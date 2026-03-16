@@ -22,7 +22,7 @@ The AERIS-10 project aims to democratize radar technology by providing a fully o
 - **Open Source Hardware & Software** - Complete schematics, PCB layouts, firmware, and software available
 - **Dual Version Availability**:
   - **AERIS-10N (Nexus)**: 3km range with 8x16 patch antenna array
-  - **AERIS-10X (Extended)**: 20km range with 32x16 dielectric-filled slotted waveguide array
+  - **AERIS-10E (Extended)**: 20km range with 32x16 dielectric-filled slotted waveguide array
 - **Full Electronic Beam Steering** - ±45° electronic steering in elevation and azimuth
 - **Advanced Signal Processing** - On-board FPGA handles pulse compression, Doppler FFT, MTI, and CFAR
 - **Python GUI** - User-friendly interface with map integration
@@ -180,4 +180,4 @@ remain under the **MIT License** for maximum flexibility.
 - MIT license terms apply to software where not otherwise specified
 
 ### Why This Change?
-Originally, the entire project used the MIT license. The community (special thanks to [GitHub Username]!) pointed out that MIT lacks legal protections needed for physical hardware. The switch to CERN-OHL-P ensures the project is properly protected while maintaining the same permissive spirit.
+Originally, the entire project used the MIT license. The community (special thanks to gmaynez!) pointed out that MIT lacks legal protections needed for physical hardware. The switch to CERN-OHL-P ensures the project is properly protected while maintaining the same permissive spirit.

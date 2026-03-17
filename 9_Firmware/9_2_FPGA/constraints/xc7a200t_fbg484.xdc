@@ -697,5 +697,52 @@ set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst
 #     -to   [get_cells -hierarchical -filter {NAME =~ *cic_*/integrator_*_dsp}]
 
 # ============================================================================
+# CDC WAIVERS — Verified False Positives (Build 13 Freeze Candidate)
+# ============================================================================
+# These 5 CDC critical warnings were analyzed during pre-hardware audit.
+# All are structurally safe and do not represent real metastability risks.
+# See project documentation for detailed justification of each waiver.
+#
+# Waiver 1: CDC-11 — 100MHz reset_sync → 400MHz ADC reset synchronizer
+# Standard async-assert/sync-deassert pattern. ASYNC_REG is applied on
+# the destination synchronizer chain. Reset is held for many source cycles.
+create_waiver -type CDC -id CDC-11 \
+    -from [get_pins -quiet -hierarchical -filter {NAME =~ *reset_sync_reg[1]/C}] \
+    -to   [get_pins -quiet -hierarchical -filter {NAME =~ *rx_inst/adc/reset_sync_400m_reg[0]/CLR}] \
+    -description "Reset synchronizer 100M->400M: async-assert/sync-deassert, ASYNC_REG applied"
+
+# Waiver 2: CDC-7 — 100MHz reset_sync → DDC active-high reset PRE
+# Active-high derived reset uses PRE (preset). PRE is the safe async
+# direction for this reset polarity. Parent chain has ASYNC_REG.
+create_waiver -type CDC -id CDC-7 \
+    -from [get_pins -quiet -hierarchical -filter {NAME =~ *reset_sync_reg[1]/C}] \
+    -to   [get_pins -quiet -hierarchical -filter {NAME =~ *rx_inst/ddc/reset_400m_reg/PRE}] \
+    -description "DDC active-high reset via PRE: safe async direction, ASYNC_REG on parent chain"
+
+# Waiver 3: CDC-11 — 100MHz reset_sync → DDC 400MHz reset synchronizer
+# Same pattern as Waiver 1, different destination module (DDC vs ADC).
+create_waiver -type CDC -id CDC-11 \
+    -from [get_pins -quiet -hierarchical -filter {NAME =~ *reset_sync_reg[1]/C}] \
+    -to   [get_pins -quiet -hierarchical -filter {NAME =~ *rx_inst/ddc/reset_sync_400m_reg[0]/CLR}] \
+    -description "Reset synchronizer 100M->400M in DDC: async-assert/sync-deassert, ASYNC_REG applied"
+
+# Waiver 4: CDC-11 — doppler_valid fan-out to USB doppler_valid_sync
+# Single rx_doppler_valid register fans out to two independent 2-stage
+# synchronizers in usb_data_interface. Both sync chains have ASYNC_REG.
+# The fan-out is covered by set_false_path (clk_100m ↔ ft601_clk_in).
+create_waiver -type CDC -id CDC-11 \
+    -from [get_pins -quiet -hierarchical -filter {NAME =~ *doppler_valid_reg/C}] \
+    -to   [get_pins -quiet -hierarchical -filter {NAME =~ *usb_inst/doppler_valid_sync_reg[0]/D}] \
+    -description "doppler_valid CDC fan-out to USB sync chain 1: ASYNC_REG + false_path applied"
+
+# Waiver 5: CDC-11 — doppler_valid fan-out to USB range_valid_sync
+# Second fan-out endpoint of the same doppler_valid signal. Same
+# justification as Waiver 4.
+create_waiver -type CDC -id CDC-11 \
+    -from [get_pins -quiet -hierarchical -filter {NAME =~ *doppler_valid_reg/C}] \
+    -to   [get_pins -quiet -hierarchical -filter {NAME =~ *usb_inst/range_valid_sync_reg[0]/D}] \
+    -description "doppler_valid CDC fan-out to USB sync chain 2: ASYNC_REG + false_path applied"
+
+# ============================================================================
 # END OF CONSTRAINTS
 # ============================================================================

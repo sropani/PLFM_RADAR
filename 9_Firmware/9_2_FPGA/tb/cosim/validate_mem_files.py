@@ -7,7 +7,7 @@ Checks:
   2. FFT twiddle files: bit-exact match against cos(2*pi*k/N) in Q15
   3. Long chirp .mem files: reverse-engineer parameters, check for chirp structure
   4. Short chirp .mem files: check length, value range, spectral content
-  5. latency_buffer_2159 LATENCY=3187 parameter validation
+   5. latency_buffer LATENCY=3187 parameter validation
 
 Usage:
     python3 validate_mem_files.py
@@ -479,8 +479,9 @@ def test_latency_buffer():
 
     # Check that the module name vs parameter is consistent
     print(f"  LATENCY parameter: {LATENCY}")
-    print(f"  Module name: latency_buffer_2159 (historical, actual LATENCY={LATENCY})")
-    warn("Module name 'latency_buffer_2159' is inconsistent with LATENCY=3187 parameter")
+    print(f"  Module name: latency_buffer (parameterized, LATENCY={LATENCY})")
+    # Module name was renamed from latency_buffer_2159 to latency_buffer
+    # to match the actual parameterized LATENCY value. No warning needed.
 
     # Validate address arithmetic won't overflow
     # read_ptr = (write_ptr - LATENCY) mod 4096

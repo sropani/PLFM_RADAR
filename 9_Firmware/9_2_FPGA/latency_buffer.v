@@ -1,7 +1,9 @@
 `timescale 1ns / 1ps
 
-// latency_buffer_2159_fixed.v
-module latency_buffer_2159 #(
+// latency_buffer.v — Parameterized BRAM-based latency/delay buffer
+// Renamed from latency_buffer_2159 to latency_buffer (module name was
+// inconsistent with the actual LATENCY=3187 parameter).
+module latency_buffer #(
     parameter DATA_WIDTH = 32,
     parameter LATENCY = 3187
 ) (

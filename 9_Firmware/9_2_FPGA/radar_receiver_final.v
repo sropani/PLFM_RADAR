@@ -192,7 +192,7 @@ end
 wire [15:0] delayed_ref_i, delayed_ref_q;
 wire mem_ready_delayed;
 
-latency_buffer_2159 #(
+latency_buffer #(
     .DATA_WIDTH(32),  // 16-bit I + 16-bit Q
 	.LATENCY(3187)
 ) ref_latency_buffer (

@@ -31,7 +31,7 @@ module tb_latency_buffer;
     always #(CLK_PERIOD/2) clk = ~clk;
 
     // ── DUT ────────────────────────────────────────────────────
-    latency_buffer_2159 #(
+    latency_buffer #(
         .DATA_WIDTH(DATA_WIDTH),
         .LATENCY(LATENCY)
     ) uut (

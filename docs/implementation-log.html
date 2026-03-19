@@ -31,24 +31,28 @@
       <h2>Recent milestone timeline</h2>
       <div class="timeline">
         <article>
-          <h3>Build 13 frozen as hardware candidate</h3>
-          <p class="muted">WNS +0.311 ns, TNS 0.000, WHS +0.060, THS 0.000 on production target.</p>
+          <h3>Build 16 XDC cleanup validated on production target</h3>
+          <p class="muted">Remote production XDC pass eliminated XDCB-5 warnings, collapsed the large TIMING-18 bucket to a single ft601_txe residue, and preserved timing at WNS +0.058 ns, WHS +0.068 ns, WPWS +0.684 ns.</p>
         </article>
         <article>
-          <h3>CDC analysis completed with waivers</h3>
-          <p class="muted">5 critical warnings verified as false positives and documented as waivers.</p>
+          <h3>Build 15 timing-clean integration baseline established</h3>
+          <p class="muted">Production-target implementation completed with all timing constraints met after USB range-profile wiring and the CFAR sequential-assignment fix.</p>
         </article>
         <article>
-          <h3>ILA insertion flow hardened</h3>
-          <p class="muted">Added net discovery pass, deferred core creation, and Vivado 2025.2 MU_CNT handling.</p>
+          <h3>USB range profile path wired to matched-filter output</h3>
+          <p class="muted">The top-level Doppler placeholder was removed from the USB range-profile path and replaced with the real matched-filter range output propagated through the receiver chain.</p>
         </article>
         <article>
-          <h3>Bring-up scripts and bitstreams generated</h3>
-          <p class="muted">Baseline + debug bitstreams, programming script, and ILA capture script prepared.</p>
+          <h3>Firmware bug sweep closed with regression coverage</h3>
+          <p class="muted">All 17 audited MCU firmware bugs were fixed, regression-tested, and pushed, including LO init ordering, SPI chip-select handling, PA calibration logic, TIM3 PWM bring-up, and stale diagnostic mismatches.</p>
         </article>
         <article>
-          <h3>Target split for Trenz development path</h3>
-          <p class="muted">Added TE0712 and TE0713 separate top wrappers/XDC/build scripts to isolate pinout differences.</p>
+          <h3>FPGA timing/resource cleanup phase completed</h3>
+          <p class="muted">Chirp BRAM migration, Doppler DSP48 pipelining, CIC pipeline staging, matched-filter regression repair, and full FPGA regression brought the active baseline to 18/18 passing tests.</p>
+        </article>
+        <article>
+          <h3>Build 13 frozen as earlier hardware candidate</h3>
+          <p class="muted">Historical milestone retained for traceability: WNS +0.311 ns, TNS 0.000, WHS +0.060, THS 0.000 on the production target before the later DSP and integration work.</p>
         </article>
       </div>
     </section>
@@ -57,19 +61,19 @@
       <article class="card">
         <h2>Codebase quality and verification upgrades</h2>
         <ul>
-          <li>Expanded simulation and co-simulation coverage with golden comparison workflows.</li>
-          <li>Formal verification executed across critical modules with passing results.</li>
-          <li>Improved reset strategy in key blocks to reduce async-reset related methodology warnings.</li>
-          <li>Renamed latency buffer module for maintainability and consistent references.</li>
+          <li>Added comprehensive DIAG instrumentation across MCU bring-up, LO, PA, USB, and safety paths before executing the bug-fix phase.</li>
+          <li>Built an STM32 HAL/mock regression harness and closed the audited firmware bug list with MCU regression passing.</li>
+          <li>Ran full FPGA regression with 18/18 passing suites, including matched filter, Doppler, CIC, CDC, USB, and system-top coverage.</li>
+          <li>Migrated the chirp LUT path toward BRAM, added DSP48 and CIC pipeline staging, and validated that the active FPGA baseline still meets timing.</li>
         </ul>
       </article>
       <article class="card">
         <h2>Debug and infrastructure improvements</h2>
         <ul>
-          <li>Post-synthesis net-name mapping documented to avoid brittle ILA net paths.</li>
-          <li>Generated both no-ILA and ILA debug bitstreams for staged bring-up.</li>
-          <li>Added dedicated scripts for TE0712/TE0713 split builds.</li>
-          <li>Created community issue to crowdsource compatible hardware test execution.</li>
+          <li>Completed Build 15 production-target analysis with timing, power, route, DRC, methodology, and CDC evidence captured in the internal engineering reports.</li>
+          <li>Validated a remote-only Build 16 XDC cleanup pass that removed XDCB-5, reduced TIMING-18 to a single ft601_txe methodology residue, and preserved post-route timing.</li>
+          <li>Kept separate Trenz development targets while prioritizing the in-stock TE0713 path for practical hardware execution.</li>
+          <li>Preserved remote Vivado baselines so timing-clean builds can be compared before and after constraint-only experiments.</li>
         </ul>
       </article>
     </section>

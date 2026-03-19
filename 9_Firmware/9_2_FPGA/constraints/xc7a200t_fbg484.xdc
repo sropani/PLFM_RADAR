@@ -525,12 +525,14 @@ set_input_delay -clock [get_clocks ft601_clk_in] -min 1.000 [get_ports {ft601_sw
 # output_delay_max = Tsu + trace_skew = 2.0 + 0.5 = 2.5 ns
 # output_delay_min = -(Th - trace_skew) = -(1.5 - 0.5) = -1.0 ns
 create_generated_clock -name dac_clk_fwd \
-    -source [get_pins -hierarchical -filter {NAME =~ *oddr_dac_clk/C}] \
+    -source [get_pins -filter {REF_PIN_NAME =~ C} -of_objects [get_cells -hierarchical *oddr_dac_clk]] \
     -divide_by 1 \
     [get_ports {dac_clk}]
 
 set_output_delay -clock [get_clocks dac_clk_fwd] -max 2.500 [get_ports {dac_data[*]}]
 set_output_delay -clock [get_clocks dac_clk_fwd] -min -1.000 [get_ports {dac_data[*]}]
+set_output_delay -clock [get_clocks dac_clk_fwd] -clock_fall -add_delay -max 2.500 [get_ports {dac_data[*]}]
+set_output_delay -clock [get_clocks dac_clk_fwd] -clock_fall -add_delay -min -1.000 [get_ports {dac_data[*]}]
 
 # Hold analysis for ODDR source-synchronous outputs is inherently safe:
 # both data ODDR and clock ODDR are driven by the same BUFG, so insertion
@@ -555,7 +557,7 @@ set_false_path -hold -from [get_clocks clk_120m_dac] -to [get_clocks dac_clk_fwd
 # output_delay_max = Tsu + trace_skew = 3.0 + 0.5 = 3.5 ns
 # output_delay_min = -(Th - trace_skew) = -(0.5 - 0.5) = 0.0 ns
 create_generated_clock -name ft601_clk_fwd \
-    -source [get_pins -hierarchical -filter {NAME =~ *oddr_ft601_clk/C}] \
+    -source [get_pins -filter {REF_PIN_NAME =~ C} -of_objects [get_cells -hierarchical *oddr_ft601_clk]] \
     -divide_by 1 \
     [get_ports {ft601_clk_out}]
 
@@ -609,6 +611,7 @@ set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks clk_100m]
 # clk_100m ↔ ft601_clk_in: USB data interface has CDC synchronizers
 set_false_path -from [get_clocks clk_100m] -to [get_clocks ft601_clk_in]
 set_false_path -from [get_clocks ft601_clk_in] -to [get_clocks clk_100m]
+set_false_path -from [get_ports {ft601_txe}] -to [all_registers -clock [get_clocks clk_100m]]
 
 # clk_120m_dac ↔ ft601_clk_in: no direct data path expected
 set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks ft601_clk_in]
@@ -742,6 +745,20 @@ create_waiver -type CDC -id CDC-11 \
     -from [get_pins -quiet -hierarchical -filter {NAME =~ *doppler_valid_reg/C}] \
     -to   [get_pins -quiet -hierarchical -filter {NAME =~ *usb_inst/range_valid_sync_reg[0]/D}] \
     -description "doppler_valid CDC fan-out to USB sync chain 2: ASYNC_REG + false_path applied"
+
+set_false_path -to [get_ports {current_elevation[*]}]
+set_false_path -to [get_ports {current_azimuth[*]}]
+set_false_path -to [get_ports {current_chirp[*]}]
+set_false_path -to [get_ports {new_chirp_frame}]
+set_false_path -to [get_ports {system_status[*]}]
+set_false_path -to [get_ports {dbg_doppler_data[*]}]
+set_false_path -to [get_ports {dbg_doppler_valid}]
+set_false_path -to [get_ports {dbg_doppler_bin[*]}]
+set_false_path -to [get_ports {dbg_range_bin[*]}]
+set_false_path -to [get_ports adar_tr_*]
+set_false_path -to [get_ports {fpga_rf_switch}]
+set_false_path -to [get_ports {rx_mixer_en}]
+set_false_path -to [get_ports {tx_mixer_en}]
 
 # ============================================================================
 # END OF CONSTRAINTS

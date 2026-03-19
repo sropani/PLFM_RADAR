@@ -24,7 +24,16 @@
     <section class="hero">
       <p class="eyebrow">Artifacts</p>
       <h1>Published Reports and Visuals</h1>
-      <p>Central access point for antenna simulations, Python simulation outputs, and visuals.</p>
+      <p>Central access point for antenna simulations, implementation summaries, timing baselines, and visuals.</p>
+    </section>
+
+    <section class="card" style="margin-top:0.8rem;">
+      <h2>Current FPGA implementation status</h2>
+      <ul>
+        <li>Build 15 is the current detailed analysis baseline for the production XC7A200T target and completed with all timing constraints met.</li>
+        <li>Build 16 was validated in the remote Vivado workspace as a constraint-cleanup pass: XDCB-5 warnings were removed, the large TIMING-18 bucket collapsed to a single <code>ft601_txe</code> methodology residue, and routed timing remained clean at WNS +0.058 ns, WHS +0.068 ns, WPWS +0.684 ns.</li>
+        <li>The remaining <code>ft601_txe</code> methodology item currently behaves like an async-status-observation residue rather than a proven unconstrained functional FT601 path.</li>
+      </ul>
     </section>
 
     <section class="grid-2" style="margin-top:0.8rem;">
@@ -51,10 +60,17 @@
     </section>
 
     <section class="card" style="margin-top:0.8rem;">
+      <h2>FPGA implementation analysis</h2>
+      <p><span class="chip">Status: Current engineering baseline</span></p>
+      <p class="muted">Primary detailed write-up: internal Build 15 implementation analysis captured timing, power, route status, DRC, methodology, CDC, and utilization for the production-target design after USB range wiring and CFAR cleanup.</p>
+      <p class="muted">Follow-on Build 16 remote validation focused on production XDC cleanup only and confirmed no timing regression while reducing methodology noise substantially.</p>
+    </section>
+
+    <section class="card" style="margin-top:0.8rem;">
       <h2>Latest Simulation Report (Recommended)</h2>
       <p><span class="chip">Status: Current baseline (v2)</span></p>
       <p class="muted">File: <code>AERIS_Simulation_Report_v2.pdf</code></p>
-      <p class="muted">Aligned to current project baseline: XC7A200T target, Build 13 freeze, regression/timing/CDC gates, ILA readiness, and TE0712/TE0713 split-target flow.</p>
+      <p class="muted">Aligned to the active project baseline: XC7A200T target, firmware regression closure, FPGA regression/timing gates, USB range-profile integration, and TE0712/TE0713 split-target flow.</p>
       <p>
         <a class="button" href="AERIS_Simulation_Report_v2.pdf" target="_blank" rel="noopener">Open PDF</a>
         <a class="button ghost" href="AERIS_Simulation_Report_v2.pdf" download>Download</a>
@@ -64,9 +80,9 @@
     <section class="card" style="margin-top:0.8rem;">
       <h2>Report Currency Notice</h2>
       <ul>
-        <li>Current implementation baseline is Build 13 on XC7A200T with full regression/timing closure campaign completed.</li>
-        <li>The simulation PDF currently published predates part of this migration and should not be treated as the latest hardware-equivalent verification record.</li>
-        <li>A revised Simulation Report v2 should align with current FPGA target, test coverage, and TE0712/TE0713 bring-up split flow.</li>
+        <li>The current routed production-target baseline is Build 15, with Build 16 used as a remote-only XDC cleanup validation pass.</li>
+        <li>The latest public simulation PDF should be interpreted alongside the implementation log and release notes for the most accurate state of firmware bug closure and FPGA integration readiness.</li>
+        <li>Detailed Build 15 and Build 16 engineering notes currently live in internal working reports and remote Vivado artifacts rather than this public docs directory.</li>
       </ul>
     </section>
 

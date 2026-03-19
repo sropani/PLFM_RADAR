@@ -40,34 +40,44 @@
           </thead>
           <tbody>
             <tr>
-              <td><code>f6877aa</code></td>
-              <td>Phase 1 hardware bring-up prep</td>
-              <td>Added ILA/debug constraints, CDC waivers, and programming/capture scripts for hardware readiness.</td>
+              <td><code>2763b4b</code></td>
+              <td>CFAR sequential fix and Build 15 analysis capture</td>
+              <td>Replaced the clocked-block CFAR blocking assignment with sequential logic and published the Build 15 timing/DRC/methodology analysis baseline.</td>
             </tr>
             <tr>
-              <td><code>12e63b7</code></td>
-              <td>ILA insertion script hardening</td>
-              <td>Fixed deferred core creation, exact-path resolution, and Vivado 2025.2 MU_CNT handling.</td>
+              <td><code>3fa26c9</code></td>
+              <td>USB range profile wiring completed</td>
+              <td>Removed the Doppler placeholder from the USB range path and propagated real matched-filter range data through the receiver/top-level interfaces.</td>
             </tr>
             <tr>
-              <td><code>0ae7b40</code></td>
-              <td>TE0712/TE0701 split target</td>
-              <td>Introduced dedicated dev top, XDC, and build flow to isolate carrier-board pinout from production target.</td>
+              <td><code>f4ff271</code></td>
+              <td>Matched-filter regression repair</td>
+              <td>Corrected golden-case <code>$readmemh</code> paths so the matched-filter regression returned to 40/40 passing.</td>
             </tr>
             <tr>
-              <td><code>967ce17</code></td>
-              <td>TE0713/TE0701 alternate target</td>
-              <td>Added in-stock SoM path with TE0713-specific constraints and build automation.</td>
+              <td><code>463ebef</code></td>
+              <td>CIC pipeline staging and regression runner</td>
+              <td>Added CIC comb pipeline staging, simulation guards, and an FPGA regression runner to preserve timing while tightening verification.</td>
             </tr>
             <tr>
-              <td><code>fcdd270</code></td>
-              <td>Initial GitHub Pages publication</td>
-              <td>Published antenna and Python simulation PDFs with static site entry point and <code>.nojekyll</code> fix.</td>
+              <td><code>c466021</code></td>
+              <td>Firmware bug sweep closure (B12-B17)</td>
+              <td>Closed the PA calibration, ADC buffer, DIAG macro, TIM3 PWM, and stale-diagnostic issues with additional MCU regression coverage.</td>
             </tr>
             <tr>
-              <td><code>94eed1e</code></td>
-              <td>Full docs website expansion</td>
-              <td>Introduced multi-page engineering documentation site with architecture, bring-up, implementation, and reports pages.</td>
+              <td><code>49c9aa2</code></td>
+              <td>SPI platform fix plus FPGA B2/B3 timing work</td>
+              <td>Fixed the legacy platform SPI transmit-only path and landed chirp BRAM migration plus Doppler DSP48 pipelining work.</td>
+            </tr>
+            <tr>
+              <td><code>3b32f67</code></td>
+              <td>ADF4382A SPI and chip-select correctness</td>
+              <td>Fixed platform SPI ops wiring, added software-managed CS behavior, and widened SPI chip-select storage to handle STM32 pin values correctly.</td>
+            </tr>
+            <tr>
+              <td><code>3979693</code></td>
+              <td>Initial 8-firmware-bug closure with tests</td>
+              <td>Closed the LO init ordering, AD9523 sequencing, sync trigger, temperature timer, GPIO mapping, and related MCU issues with regression coverage.</td>
             </tr>
           </tbody>
         </table>
@@ -75,14 +85,25 @@
     </section>
 
     <section class="card" style="margin-top:0.8rem;">
+      <h2>Uncommitted validated work</h2>
+      <ul>
+        <li>Build 16 remote production-XDC cleanup has been validated in the remote Vivado workspace but is not yet represented by a git commit.</li>
+        <li>The remote-only pass removed XDCB-5 warnings, reduced the large TIMING-18 bucket to a single <code>ft601_txe</code> methodology residue, and preserved timing at WNS +0.058 ns, WHS +0.068 ns, WPWS +0.684 ns.</li>
+        <li>The surviving <code>ft601_txe</code> item currently behaves like a methodology residue on an async status-observation path rather than a proven unconstrained functional FT601 interface.</li>
+      </ul>
+    </section>
+
+    <section class="card" style="margin-top:0.8rem;">
       <h2>Open in GitHub</h2>
       <ul>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/f6877aa" target="_blank" rel="noopener">f6877aa</a></li>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/12e63b7" target="_blank" rel="noopener">12e63b7</a></li>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/0ae7b40" target="_blank" rel="noopener">0ae7b40</a></li>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/967ce17" target="_blank" rel="noopener">967ce17</a></li>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/fcdd270" target="_blank" rel="noopener">fcdd270</a></li>
-        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/94eed1e" target="_blank" rel="noopener">94eed1e</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/2763b4b" target="_blank" rel="noopener">2763b4b</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/3fa26c9" target="_blank" rel="noopener">3fa26c9</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/f4ff271" target="_blank" rel="noopener">f4ff271</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/463ebef" target="_blank" rel="noopener">463ebef</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/c466021" target="_blank" rel="noopener">c466021</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/49c9aa2" target="_blank" rel="noopener">49c9aa2</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/3b32f67" target="_blank" rel="noopener">3b32f67</a></li>
+        <li><a href="https://github.com/JJassonn69/PLFM_RADAR/commit/3979693" target="_blank" rel="noopener">3979693</a></li>
       </ul>
     </section>
   </main>

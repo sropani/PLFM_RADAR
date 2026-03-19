@@ -1,0 +1,262 @@
+
+
+############################CLOCK INPUT SI5351 100MHz########################
+
+set_property PACKAGE_PIN N11 [get_ports CLK_IN]
+set_property IOSTANDARD LVCMOS33 [get_ports CLK_IN]
+create_clock -period 10.0 [get_ports CLK_IN]  #100 MHz clock
+
+###############################Microcontroller###############################
+
+set_property PACKAGE_PIN E12 [get_ports STM32_SCLK]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_SCLK]
+
+set_property PACKAGE_PIN H13 [get_ports STM32_MOSI]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_MOSI]
+
+set_property PACKAGE_PIN G14 [get_ports STM32_MISO]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_MISO]
+
+set_property PACKAGE_PIN F14 [get_ports STM32_CS_ADAR_1]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_CS_ADAR_1]
+
+set_property PACKAGE_PIN H16 [get_ports STM32_CS_ADAR_2]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_CS_ADAR_2]
+
+set_property PACKAGE_PIN G16 [get_ports STM32_CS_ADAR_3]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_CS_ADAR_3]
+
+set_property PACKAGE_PIN J15 [get_ports STM32_CS_ADAR_4]
+set_property IOSTANDARD LVCMOS33 [get_ports STM32_CS_ADAR_4]
+
+set_property PACKAGE_PIN F13 [get_ports DIG_0]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_0]
+
+set_property PACKAGE_PIN E16 [get_ports DIG_1]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_1]
+
+set_property PACKAGE_PIN D16 [get_ports DIG_2]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_2]
+
+set_property PACKAGE_PIN F15 [get_ports DIG_3]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_3
+
+set_property PACKAGE_PIN E15 [get_ports DIG_4]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_4]
+
+set_property PACKAGE_PIN H11 [get_ports DIG_5]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_5]
+
+set_property PACKAGE_PIN G12 [get_ports DIG_6]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_6]
+
+set_property PACKAGE_PIN H12 [get_ports DIG_7]
+set_property IOSTANDARD LVCMOS33 [get_ports DIG_7]
+
+###############################DAC AD9708AR##################################
+
+set_property PACKAGE_PIN A14 [get_ports DAC_0] #LSB
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_0]
+
+set_property PACKAGE_PIN A13 [get_ports DAC_1]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_1]
+
+set_property PACKAGE_PIN A12 [get_ports DAC_2]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_2]
+
+set_property PACKAGE_PIN B11 [get_ports DAC_3]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_3]
+
+set_property PACKAGE_PIN B10 [get_ports DAC_4]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_4]
+
+set_property PACKAGE_PIN A10 [get_ports DAC_5]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_5]
+
+set_property PACKAGE_PIN A9 [get_ports DAC_6]
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_6]
+
+set_property PACKAGE_PIN A8 [get_ports DAC_7] #MSB
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_7]
+
+set_property PACKAGE_PIN A15 [get_ports DAC_SLEEP] #active high
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_SLEEP]
+
+set_property PACKAGE_PIN C13 [get_ports DAC_CLK]  #data latched on pos. edge of clock # C13 should be an MRCC/SRCC pin
+set_property IOSTANDARD LVCMOS33 [get_ports DAC_CLK]
+set_property DRIVE 16 [get_ports DAC_CLK]  # Adjust drive strength if needed
+set_property SLEW FAST [get_ports DAC_CLK]  # Ensure fast edge transition
+
+###############################MIXER LTC5552##################################
+
+set_property PACKAGE_PIN C11 [get_ports MIX_TX_EN]
+set_property IOSTANDARD LVCMOS33 [get_ports MIX_TX_EN]
+
+set_property PACKAGE_PIN M6 [get_ports MIX_RX_EN]
+set_property IOSTANDARD LVCMOS33 [get_ports MIX_RX_EN]
+
+###############################ADC MAX1449##################################
+
+set_property PACKAGE_PIN T8 [get_ports ADC_0] #LSB
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_0]
+
+set_property PACKAGE_PIN T9 [get_ports ADC_1] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_1]
+
+set_property PACKAGE_PIN T10 [get_ports ADC_2] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_2]
+
+set_property PACKAGE_PIN R11 [get_ports ADC_3] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_3]
+
+set_property PACKAGE_PIN T12 [get_ports ADC_4] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_4]
+
+set_property PACKAGE_PIN T13 [get_ports ADC_5] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_5]
+
+set_property PACKAGE_PIN T14 [get_ports ADC_6] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_6]
+
+set_property PACKAGE_PIN T15 [get_ports ADC_7] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_7]
+
+set_property PACKAGE_PIN R14 [get_ports ADC_8] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_8]
+
+set_property PACKAGE_PIN R16 [get_ports ADC_9] #MSB
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_9]
+
+set_property PACKAGE_PIN M16 [get_ports ADC_PD] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_PD]
+
+set_property PACKAGE_PIN N16 [get_ports ADC_OE] 
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_OE]
+
+set_property PACKAGE_PIN P14 [get_ports ADC_CLK]  # P14 should be an MRCC/SRCC pin
+set_property IOSTANDARD LVCMOS33 [get_ports ADC_CLK]
+set_property DRIVE 16 [get_ports ADC_CLK]  # Adjust drive strength if needed
+set_property SLEW FAST [get_ports ADC_CLK]  # Ensure fast edge transition
+
+#############################RF SWITCH M3SWA2-34DR+##############################
+
+set_property PACKAGE_PIN P8 [get_ports M3S_VCTRL] 
+set_property IOSTANDARD LVCMOS33 [get_ports M3S_VCTRL]
+
+###############################ADAR1000_1_2_3_4##################################
+
+set_property PACKAGE_PIN F5 [get_ports SPI_SCLK_1V8]
+set_property IOSTANDARD LVCMOS18 [get_ports SPI_SCLK_1V8]
+set_property DRIVE 16 [get_ports SPI_SCLK_1V8]  # Adjust drive strength if needed
+set_property SLEW FAST [get_ports SPI_SCLK_1V8]  # Ensure fast edge transition
+
+set_property PACKAGE_PIN B5 [get_ports SPI_MOSI_1V8]
+set_property IOSTANDARD LVCMOS18 [get_ports SPI_MOSI_1V8]
+
+set_property PACKAGE_PIN A5 [get_ports SPI_MISO_1V8]
+set_property IOSTANDARD LVCMOS18 [get_ports SPI_MISO_1V8]
+
+set_property PACKAGE_PIN E6 [get_ports CS_ADAR_1V8_1]
+set_property IOSTANDARD LVCMOS18 [get_ports CS_ADAR_1V8_1]
+
+set_property PACKAGE_PIN B7 [get_ports CS_ADAR_1V8_2]
+set_property IOSTANDARD LVCMOS18 [get_ports CS_ADAR_1V8_2]
+
+set_property PACKAGE_PIN A7 [get_ports CS_ADAR_1V8_3]
+set_property IOSTANDARD LVCMOS18 [get_ports CS_ADAR_1V8_3]
+
+set_property PACKAGE_PIN B6 [get_ports CS_ADAR_1V8_4]
+set_property IOSTANDARD LVCMOS18 [get_ports CS_ADAR_1V8_4]
+
+set_property PACKAGE_PIN A4 [get_ports ADAR_TR_1]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TR_1]
+
+set_property PACKAGE_PIN B4 [get_ports ADAR_TR_2]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TR_2]
+
+set_property PACKAGE_PIN A3 [get_ports ADAR_TR_3]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TR_3]
+
+set_property PACKAGE_PIN C7 [get_ports ADAR_TR_4]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TR_4]
+
+set_property PACKAGE_PIN C6 [get_ports ADAR_TX_LOAD_1]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TX_LOAD_1]
+
+set_property PACKAGE_PIN G1 [get_ports ADAR_TX_LOAD_2]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TX_LOAD_2]
+
+set_property PACKAGE_PIN G4 [get_ports ADAR_TX_LOAD_3]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TX_LOAD_3]
+
+set_property PACKAGE_PIN E1 [get_ports ADAR_TX_LOAD_4]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_TX_LOAD_4]
+
+set_property PACKAGE_PIN D6 [get_ports ADAR_RX_LOAD_1]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_RX_LOAD_1]
+
+set_property PACKAGE_PIN G2 [get_ports ADAR_RX_LOAD_2]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_RX_LOAD_2]
+
+set_property PACKAGE_PIN G5 [get_ports ADAR_RX_LOAD_3]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_RX_LOAD_3]
+
+set_property PACKAGE_PIN F2 [get_ports ADAR_RX_LOAD_4]
+set_property IOSTANDARD LVCMOS18 [get_ports ADAR_RX_LOAD_4]
+
+###############################FT2232HQ##################################
+
+set_property PACKAGE_PIN N1 [get_ports FT_D0] #LSB
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D0]
+
+set_property PACKAGE_PIN P1 [get_ports FT_D1] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D1]
+
+set_property PACKAGE_PIN R1 [get_ports FT_D2] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D2]
+
+set_property PACKAGE_PIN N2 [get_ports FT_D3] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D3]
+
+set_property PACKAGE_PIN R2 [get_ports FT_D4] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D4]
+
+set_property PACKAGE_PIN T2 [get_ports FT_D5] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D5]
+
+set_property PACKAGE_PIN N3 [get_ports FT_D6] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D6]
+
+set_property PACKAGE_PIN P3 [get_ports FT_D7] #MSB
+set_property IOSTANDARD LVCMOS33 [get_ports FT_D7]
+
+set_property PACKAGE_PIN L5 [get_ports FT_OE] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_OE]
+
+set_property PACKAGE_PIN L4 [get_ports FT_RD] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_RD]
+
+set_property PACKAGE_PIN P4 [get_ports FT_WR] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_WR]
+
+set_property PACKAGE_PIN N4 [get_ports FT_TXE] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_TXE]
+
+set_property PACKAGE_PIN T3 [get_ports FT_RXF] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_RXF]
+
+set_property PACKAGE_PIN P5 [get_ports FT_SIWA] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_SIWA]
+
+set_property PACKAGE_PIN T4 [get_ports FT_CLKOUT] 
+set_property IOSTANDARD LVCMOS33 [get_ports FT_CLKOUT]
+
+
+
+
+
+
+
+
+
+

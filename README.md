@@ -181,3 +181,11 @@ remain under the **MIT License** for maximum flexibility.
 
 ### Why This Change?
 Originally, the entire project used the MIT license. The community (special thanks to gmaynez!) pointed out that MIT lacks legal protections needed for physical hardware. The switch to CERN-OHL-P ensures the project is properly protected while maintaining the same permissive spirit.
+
+## Contact & Collaboration
+I welcome serious inquiries from researchers, engineers, and potential collaborators. However, due to the high volume of interest in this project, please understand that I cannot guarantee a response to every message.
+
+For technical questions or bug reports: Please open a GitHub issue so the whole community can benefit from the discussion.
+
+For collaboration, licensing, or business inquiries:
+📧 nawfal.motii.33 [at] gmail [dot] com

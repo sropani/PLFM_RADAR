@@ -31,7 +31,7 @@ The AERIS-10 project aims to democratize radar technology by providing a fully o
 
 ## 🏗️ System Architecture
 
-![AERIS-10 Radar System](8_Utils/RADAR_V6.jpg)
+![AERIS-10 Radar System](8_Utils/RADAR_V6_V2.png)
 
 ### Hardware Components
 

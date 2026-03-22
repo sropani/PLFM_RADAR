@@ -19,6 +19,21 @@ module doppler_processor_optimized #(
     output wire processing_active,
     output wire frame_complete,
     output reg [3:0] status
+
+`ifdef FORMAL
+    ,
+    output wire [2:0]  fv_state,
+    output wire [10:0] fv_mem_write_addr,
+    output wire [10:0] fv_mem_read_addr,
+    output wire [5:0]  fv_write_range_bin,
+    output wire [4:0]  fv_write_chirp_index,
+    output wire [5:0]  fv_read_range_bin,
+    output wire [4:0]  fv_read_doppler_index,
+    output wire [9:0]  fv_processing_timeout,
+    output wire        fv_frame_buffer_full,
+    output wire        fv_mem_we,
+    output wire [10:0] fv_mem_waddr_r
+`endif
 );
 
 // ==============================================
@@ -83,6 +98,8 @@ wire fft_ready;
 reg [DATA_WIDTH-1:0] fft_input_i;
 reg [DATA_WIDTH-1:0] fft_input_q;
 reg signed [31:0] mult_i, mult_q;  // 32-bit to avoid overflow
+reg signed [DATA_WIDTH-1:0] window_val_reg;   // BREG pipeline stage
+reg signed [31:0] mult_i_raw, mult_q_raw;     // MREG pipeline stage
 
 reg fft_input_valid;
 reg fft_input_last;
@@ -112,6 +129,7 @@ assign mem_read_addr = (read_doppler_index * RANGE_BINS) + read_range_bin;
 reg [2:0] state;
 localparam S_IDLE       = 3'b000;
 localparam S_ACCUMULATE = 3'b001;
+localparam S_PRE_READ   = 3'b101;  // Prime BRAM pipeline before FFT load
 localparam S_LOAD_FFT   = 3'b010;
 localparam S_FFT_WAIT   = 3'b011;
 localparam S_OUTPUT     = 3'b100;
@@ -130,13 +148,57 @@ wire frame_start_pulse = new_chirp_frame & ~new_chirp_frame_d1;
 reg [5:0] fft_sample_counter;
 reg [9:0] processing_timeout;
 
+// Memory write enable and data signals (extracted for BRAM inference)
+reg mem_we;
+reg [10:0] mem_waddr_r;
+reg [DATA_WIDTH-1:0] mem_wdata_i, mem_wdata_q;
+
+// Memory read data (registered for BRAM read latency)
+reg [DATA_WIDTH-1:0] mem_rdata_i, mem_rdata_q;
+
+`ifdef FORMAL
+assign fv_state              = state;
+assign fv_mem_write_addr     = mem_write_addr;
+assign fv_mem_read_addr      = mem_read_addr;
+assign fv_write_range_bin    = write_range_bin;
+assign fv_write_chirp_index  = write_chirp_index;
+assign fv_read_range_bin     = read_range_bin;
+assign fv_read_doppler_index = read_doppler_index;
+assign fv_processing_timeout = processing_timeout;
+assign fv_frame_buffer_full  = frame_buffer_full;
+assign fv_mem_we             = mem_we;
+assign fv_mem_waddr_r        = mem_waddr_r;
+`endif
+
+// ----------------------------------------------------------
+// Separate always block for memory writes — NO async reset
+// in sensitivity list, so Vivado can infer Block RAM.
+// ----------------------------------------------------------
+always @(posedge clk) begin
+    if (mem_we) begin
+        doppler_i_mem[mem_waddr_r] <= mem_wdata_i;
+        doppler_q_mem[mem_waddr_r] <= mem_wdata_q;
+    end
+    // Registered read — address driven by mem_read_addr from FSM
+    mem_rdata_i <= doppler_i_mem[mem_read_addr];
+    mem_rdata_q <= doppler_q_mem[mem_read_addr];
+end
+
+// ----------------------------------------------------------
+// Block 1: FSM / Control — async reset (posedge clk or negedge reset_n).
+// Only state-machine and control registers live here.
+// BRAM-driving and DSP datapath registers are intentionally
+// excluded to avoid Vivado REQP-1839 (async-reset on BRAM
+// address) and DPOR-1/DPIP-1 (async-reset blocking DSP48
+// absorption) DRC warnings.
+// ----------------------------------------------------------
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         state <= S_IDLE;
         write_range_bin <= 0;
         write_chirp_index <= 0;
-        read_range_bin <= 0;
-        read_doppler_index <= 0;
+        // read_range_bin, read_doppler_index moved to Block 2 (sync reset)
+        // to enable BRAM address register absorption (REQP-1839 fix)
         frame_buffer_full <= 0;
         doppler_valid <= 0;
         fft_start <= 0;
@@ -147,6 +209,9 @@ always @(posedge clk or negedge reset_n) begin
         status <= 0;
         chirps_received <= 0;
         chirp_state <= 0;
+        doppler_output <= 0;
+        doppler_bin <= 0;
+        range_bin <= 0;
     end else begin
         doppler_valid <= 0;
         fft_input_valid <= 0;
@@ -164,25 +229,16 @@ always @(posedge clk or negedge reset_n) begin
                     write_range_bin <= 0;
                     frame_buffer_full <= 0;
                     chirps_received <= 0;
-                    //chirp_state <= 1;  // Start accumulating
                 end
                 
                 if (data_valid && !frame_buffer_full) begin
                     state <= S_ACCUMULATE;
-						  write_range_bin <= 0;
+                    write_range_bin <= 1;
                 end
             end
             
             S_ACCUMULATE: begin
                 if (data_valid) begin
-                    // Store with proper addressing
-                    doppler_i_mem[mem_write_addr] <= range_data[15:0];
-                    doppler_q_mem[mem_write_addr] <= range_data[31:16];
-                    
-                    // Debug output to see what's being written
-                    // $display("Time=%t: Write addr=%d (chirp=%d, range=%d), Data=%h",
-                    //          $time, mem_write_addr, write_chirp_index, write_range_bin, range_data);
-                    
                     // Increment range bin
                     if (write_range_bin < RANGE_BINS - 1) begin
                         write_range_bin <= write_range_bin + 1;
@@ -195,47 +251,70 @@ always @(posedge clk or negedge reset_n) begin
                         // Check if frame is complete
                         if (write_chirp_index >= CHIRPS_PER_FRAME - 1) begin
                             frame_buffer_full <= 1;
-                            chirp_state <= 0;  // Stop accumulating
-                            // Could automatically start processing here:
-                            state <= S_LOAD_FFT;
-                            read_range_bin <= 0;
-                            read_doppler_index <= 0;
+                            chirp_state <= 0;
+                            state <= S_PRE_READ;
+                            // read_range_bin/read_doppler_index zeroed in Block 2
                             fft_sample_counter <= 0;
-                            fft_start <= 1;
+                            // Reset write pointers — no longer needed for
+                            // this frame, and prevents stale overflow of
+                            // write_chirp_index (which was just incremented
+                            // past CHIRPS_PER_FRAME-1 above).
+                            write_chirp_index <= 0;
+                            write_range_bin <= 0;
                         end
                     end
                 end 
             end
             
-            // [Rest of S_LOAD_FFT, S_FFT_WAIT, S_OUTPUT states remain similar]
-            // But with fixed addressing in S_LOAD_FFT:
+            S_PRE_READ: begin
+                // Prime the BRAM pipeline: present addr for chirp 0 of
+                // current read_range_bin.  read_doppler_index is already 0.
+                // mem_read_addr = 0 * RANGE_BINS + read_range_bin.
+                // After this cycle, mem_rdata_i will hold data[chirp=0][rbin].
+                // Advance read_doppler_index to 1 so the NEXT BRAM read
+                // (which happens every cycle in the memory block) will
+                // fetch chirp 1.
+                // read_doppler_index <= 1 moved to Block 2
+                fft_start <= 1;
+                state <= S_LOAD_FFT;
+            end
+
             S_LOAD_FFT: begin
                 fft_start <= 0;
                 
-                if (fft_sample_counter < DOPPLER_FFT_SIZE) begin
-                    // Use correct addressing for reading
-                    mult_i <= $signed(doppler_i_mem[mem_read_addr]) * 
-                                   $signed(window_coeff[read_doppler_index]);
-                    mult_q <= $signed(doppler_q_mem[mem_read_addr]) * 
-                                   $signed(window_coeff[read_doppler_index]);
-                    
-						          // Round instead of truncate
-						  fft_input_i <= (mult_i + (1 << 14)) >>> 15;  // Round to nearest
-						  fft_input_q <= (mult_q + (1 << 14)) >>> 15;
-                    
-						  fft_input_valid <= 1;
-                    
-                    if (fft_sample_counter == DOPPLER_FFT_SIZE - 1) begin
-                        fft_input_last <= 1;
-                    end
-                    
-                    // Increment chirp index for next sample
-                    read_doppler_index <= read_doppler_index + 1;
+                // Pipeline alignment (after S_PRE_READ primed the BRAM
+                // and pre-registered window_val_reg = window_coeff[0]):
+                //
+                // With DSP48 BREG+MREG pipelining, data flows through:
+                //   sub=0: multiply mem_rdata * window_val_reg -> mult_i_raw
+                //          pre-register window_coeff[1] into window_val_reg
+                //   sub=1: MREG capture mult_i_raw -> mult_i (sample 0)
+                //          new multiply for sample 1
+                //   sub=2..DOPPLER_FFT_SIZE+1: steady state —
+                //          fft_input = rounding(mult_i), mult_i = mult_i_raw,
+                //          mult_i_raw = new multiply, window_val_reg = next coeff
+                //
+                // fft_input_valid asserted at sub=2..DOPPLER_FFT_SIZE+1
+                // fft_input_last  asserted at sub=DOPPLER_FFT_SIZE+1
+
+                // read_doppler_index updates moved to Block 2 (sync reset)
+                if (fft_sample_counter <= 1) begin
+                    // Sub 0..1: pipeline priming — no valid FFT data yet
                     fft_sample_counter <= fft_sample_counter + 1;
-                end else begin
-                    state <= S_FFT_WAIT;
-                    fft_sample_counter <= 0;
-                    processing_timeout <= 100;
+                end else if (fft_sample_counter <= DOPPLER_FFT_SIZE + 1) begin
+                    // Sub 2..DOPPLER_FFT_SIZE+1: steady state
+                    // (fft_input_i/fft_input_q captured in Block 2)
+                    fft_input_valid <= 1;
+
+                    if (fft_sample_counter == DOPPLER_FFT_SIZE + 1) begin
+                        // Last sample: flush
+                        fft_input_last <= 1;
+                        state <= S_FFT_WAIT;
+                        fft_sample_counter <= 0;
+                        processing_timeout <= 1000;
+                    end else begin
+                        fft_sample_counter <= fft_sample_counter + 1;
+                    end
                 end
             end
             
@@ -261,10 +340,9 @@ always @(posedge clk or negedge reset_n) begin
             
             S_OUTPUT: begin
                 if (read_range_bin < RANGE_BINS - 1) begin
-                    read_range_bin <= read_range_bin + 1;
-                    read_doppler_index <= 0;
-                    state <= S_LOAD_FFT;
-                    fft_start <= 1;
+                    // read_range_bin/read_doppler_index updated in Block 2
+                    fft_sample_counter <= 0;
+                    state <= S_PRE_READ;
                 end else begin
                     state <= S_IDLE;
                     frame_buffer_full <= 0;
@@ -274,6 +352,144 @@ always @(posedge clk or negedge reset_n) begin
         endcase
         
         status <= {state, frame_buffer_full};
+    end
+end
+
+// ----------------------------------------------------------
+// Block 2: BRAM address/data & DSP datapath — synchronous reset only.
+// Uses always @(posedge clk) so Vivado can absorb multipliers
+// into DSP48 primitives and does not flag REQP-1839/1840 on
+// BRAM address registers.  Replicates the same state/condition
+// structure as Block 1 for the registers:
+//   mem_we, mem_waddr_r, mem_wdata_i, mem_wdata_q,
+//   mult_i, mult_q, fft_input_i, fft_input_q,
+//   read_range_bin, read_doppler_index
+// ----------------------------------------------------------
+always @(posedge clk) begin
+    if (!reset_n) begin
+        mem_we      <= 0;
+        mem_waddr_r <= 0;
+        mem_wdata_i <= 0;
+        mem_wdata_q <= 0;
+        mult_i      <= 0;
+        mult_q      <= 0;
+        mult_i_raw     <= 0;
+        mult_q_raw     <= 0;
+        window_val_reg <= 0;
+        fft_input_i <= 0;
+        fft_input_q <= 0;
+        read_range_bin     <= 0;
+        read_doppler_index <= 0;
+    end else begin
+        mem_we <= 0;
+        
+        case (state)
+            S_IDLE: begin
+                if (data_valid && !frame_buffer_full) begin
+                    // Write the first sample immediately (Bug #3 fix:
+                    // previously this transition consumed data_valid
+                    // without writing to BRAM)
+                    mem_we      <= 1;
+                    mem_waddr_r <= mem_write_addr;
+                    mem_wdata_i <= range_data[15:0];
+                    mem_wdata_q <= range_data[31:16];
+                end
+            end
+            
+            S_ACCUMULATE: begin
+                if (data_valid) begin
+                    // Drive memory write signals (actual write in separate block)
+                    mem_we      <= 1;
+                    mem_waddr_r <= mem_write_addr;
+                    mem_wdata_i <= range_data[15:0];
+                    mem_wdata_q <= range_data[31:16];
+
+                    // Transition to S_PRE_READ when frame complete
+                    if (write_range_bin >= RANGE_BINS - 1 &&
+                        write_chirp_index >= CHIRPS_PER_FRAME - 1) begin
+                        read_range_bin     <= 0;
+                        read_doppler_index <= 0;
+                    end
+                end
+            end
+            
+            S_PRE_READ: begin
+                // Advance read_doppler_index to 1 so next BRAM read
+                // fetches chirp 1
+                read_doppler_index <= 1;
+                // BREG priming: pre-register window coeff for sample 0
+                // so it is ready when S_LOAD_FFT sub=0 performs the multiply
+                window_val_reg <= $signed(window_coeff[0]);
+            end
+
+            S_LOAD_FFT: begin
+                if (fft_sample_counter == 0) begin
+                    // Pipe stage 1: multiply using pre-registered BREG value
+                    // mem_rdata_i = data[chirp=0][rbin] (primed by S_PRE_READ)
+                    mult_i_raw <= $signed(mem_rdata_i) * window_val_reg;
+                    mult_q_raw <= $signed(mem_rdata_q) * window_val_reg;
+                    // Pre-register next window coeff (sample 1)
+                    window_val_reg <= $signed(window_coeff[1]);
+                    // Present BRAM addr for chirp 2
+                    read_doppler_index <= (2 < DOPPLER_FFT_SIZE) ? 2
+                                          : DOPPLER_FFT_SIZE - 1;
+                end else if (fft_sample_counter == 1) begin
+                    // Pipe stage 2 (MREG): capture sample 0 multiply result
+                    mult_i <= mult_i_raw;
+                    mult_q <= mult_q_raw;
+                    // Multiply sample 1 using registered window value
+                    mult_i_raw <= $signed(mem_rdata_i) * window_val_reg;
+                    mult_q_raw <= $signed(mem_rdata_q) * window_val_reg;
+                    // Pre-register next window coeff (sample 2)
+                    if (2 < DOPPLER_FFT_SIZE)
+                        window_val_reg <= $signed(window_coeff[2]);
+                    // Advance BRAM read to chirp 3
+                    if (3 < DOPPLER_FFT_SIZE)
+                        read_doppler_index <= 3;
+                    else
+                        read_doppler_index <= DOPPLER_FFT_SIZE - 1;
+                end else if (fft_sample_counter <= DOPPLER_FFT_SIZE + 1) begin
+                    // Sub 2..DOPPLER_FFT_SIZE+1: steady state
+                    // Capture rounding into fft_input from MREG output
+                    fft_input_i <= (mult_i + (1 << 14)) >>> 15;
+                    fft_input_q <= (mult_q + (1 << 14)) >>> 15;
+                    // MREG: capture multiply result
+                    mult_i <= mult_i_raw;
+                    mult_q <= mult_q_raw;
+
+                    if (fft_sample_counter <= DOPPLER_FFT_SIZE - 1) begin
+                        // New multiply from current BRAM data
+                        mult_i_raw <= $signed(mem_rdata_i) * window_val_reg;
+                        mult_q_raw <= $signed(mem_rdata_q) * window_val_reg;
+                        // Pre-register next window coeff (clamped)
+                        if (fft_sample_counter + 1 < DOPPLER_FFT_SIZE)
+                            window_val_reg <= $signed(window_coeff[fft_sample_counter + 1]);
+                        // Advance BRAM read
+                        if (fft_sample_counter + 2 < DOPPLER_FFT_SIZE)
+                            read_doppler_index <= fft_sample_counter + 2;
+                        else
+                            read_doppler_index <= DOPPLER_FFT_SIZE - 1;
+                    end
+
+                    if (fft_sample_counter == DOPPLER_FFT_SIZE + 1) begin
+                        // Flush complete — reset read index
+                        read_doppler_index <= 0;
+                    end
+                end
+            end
+
+            S_OUTPUT: begin
+                if (read_range_bin < RANGE_BINS - 1) begin
+                    read_range_bin     <= read_range_bin + 1;
+                    read_doppler_index <= 0;
+                end
+            end
+
+            default: begin
+                // S_IDLE, S_FFT_WAIT:
+                // no BRAM-write, DSP, or read-address operations needed
+            end
+        endcase
     end
 end
 

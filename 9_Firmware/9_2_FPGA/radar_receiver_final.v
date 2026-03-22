@@ -11,18 +11,69 @@ module radar_receiver_final (
     input wire adc_dco_n,            // Data Clock Output N (400MHz LVDS)
 	 output wire adc_pwdn,
     
-    output reg [31:0] doppler_output,
-    output reg doppler_valid,
-    output reg [4:0] doppler_bin,
-    output reg [5:0] range_bin
+    // Chirp counter from transmitter (for frame sync and matched filter)
+    input wire [5:0] chirp_counter,
+    
+    output wire [31:0] doppler_output,
+    output wire doppler_valid,
+    output wire [4:0] doppler_bin,
+    output wire [5:0] range_bin,
+    
+    // Matched filter range profile output (for USB)
+    output wire signed [15:0] range_profile_i_out,
+    output wire signed [15:0] range_profile_q_out,
+    output wire range_profile_valid_out,
+    
+    // Host command inputs (Gap 4: USB Read Path, CDC-synchronized)
+    // CDC-synchronized in radar_system_top.v before reaching here
+    input wire [1:0] host_mode,      // Radar mode: 00=STM32, 01=auto-scan, 10=single-chirp
+    input wire host_trigger,          // Single-chirp trigger pulse (1 clk cycle)
+
+    // Gap 2: Host-configurable chirp timing (CDC-synchronized in radar_system_top.v)
+    input wire [15:0] host_long_chirp_cycles,
+    input wire [15:0] host_long_listen_cycles,
+    input wire [15:0] host_guard_cycles,
+    input wire [15:0] host_short_chirp_cycles,
+    input wire [15:0] host_short_listen_cycles,
+    input wire [5:0]  host_chirps_per_elev,
+
+    // Digital gain control (Fix 3: between DDC output and matched filter)
+    // [3]=direction: 0=amplify(left shift), 1=attenuate(right shift)
+    // [2:0]=shift amount: 0..7 bits. Default 0 = pass-through.
+    input wire [3:0] host_gain_shift,
+
+    // STM32 toggle signals for mode 00 (STM32-driven) pass-through.
+    // These are CDC-synchronized in radar_system_top.v / radar_transmitter.v
+    // before reaching this module. In mode 00, the RX mode controller uses
+    // these to synchronize receiver processing with STM32-timed chirps.
+    input wire stm32_new_chirp_rx,
+    input wire stm32_new_elevation_rx,
+    input wire stm32_new_azimuth_rx,
+
+    // CFAR integration: expose Doppler frame_complete to top level
+    output wire doppler_frame_done_out,
+
+    // Ground clutter removal controls
+    input wire        host_mti_enable,       // 1=MTI active, 0=pass-through
+    input wire [2:0]  host_dc_notch_width,   // DC notch: zero Doppler bins within ±width of DC
+
+    // ADC raw data tap (clk_100m domain, post-DDC, for self-test / debug)
+    output wire [15:0] dbg_adc_i,            // DDC output I (16-bit signed, 100 MHz)
+    output wire [15:0] dbg_adc_q,            // DDC output Q (16-bit signed, 100 MHz)
+    output wire        dbg_adc_valid         // DDC output valid (100 MHz)
 );
 
 // ========== INTERNAL SIGNALS ==========
 wire use_long_chirp;
-wire [5:0] chirp_counter;
+// NOTE: chirp_counter is now an input port (was undriven internal wire — bug NEW-1)
 wire chirp_start;
 wire azimuth_change;
 wire elevation_change;
+
+// Mode controller outputs → matched_filter_multi_segment
+wire mc_new_chirp;
+wire mc_new_elevation;
+wire mc_new_azimuth;
 
 wire [1:0] segment_request;
 wire mem_request;
@@ -31,6 +82,11 @@ wire mem_ready;
 
 wire [15:0] adc_i_scaled, adc_q_scaled;
 wire adc_valid_sync;
+
+// Gain-controlled signals (between DDC output and matched filter)
+wire signed [15:0] gc_i, gc_q;
+wire gc_valid;
+wire [7:0] gc_saturation_count;  // Diagnostic: clipped sample counter
 
 // Reference signals for the processing chain
 wire [15:0] long_chirp_real, long_chirp_imag;
@@ -45,9 +101,9 @@ wire new_chirp_frame;
 wire [31:0] doppler_spectrum;
 wire doppler_spectrum_valid;
 wire [4:0] doppler_bin_out;
-wire [5:0] doppler_range_bin_out;
 wire doppler_processing;
 wire doppler_frame_done;
+assign doppler_frame_done_out = doppler_frame_done;
 
 // ========== RANGE BIN DECIMATOR SIGNALS ==========
 wire signed [15:0] decimated_range_i;
@@ -55,54 +111,82 @@ wire signed [15:0] decimated_range_q;
 wire decimated_range_valid;
 wire [5:0] decimated_range_bin;
 
-// ========== MODULE INSTANTIATIONS ==========
-reg clk_400m;
+// ========== MTI CANCELLER SIGNALS ==========
+wire signed [15:0] mti_range_i;
+wire signed [15:0] mti_range_q;
+wire mti_range_valid;
+wire [5:0] mti_range_bin;
+wire mti_first_chirp;
 
-lvds_to_cmos_400m clk_400m_inst(
-    // ADC Physical Interface (LVDS Inputs)
-    .clk_400m_p(adc_dco_p),            // Data Clock Output P (400MHz LVDS, 2.5V)
-    .clk_400m_n(adc_dco_n),            // Data Clock Output N (400MHz LVDS, 2.5V)
-    .reset_n(reset_n),              // Active-low reset
-    
-    // CMOS Output Interface (400MHz Domain)
-    .clk_400m_cmos(clk_400m)         // ADC data clock (CMOS, 3.3V)
+// ========== RADAR MODE CONTROLLER SIGNALS ==========
+wire rmc_scanning;
+wire rmc_scan_complete;
+wire [5:0] rmc_chirp_count;
+wire [5:0] rmc_elevation_count;
+wire [5:0] rmc_azimuth_count;
+
+// ========== MODULE INSTANTIATIONS ==========
+
+// 0. Radar Mode Controller — drives chirp/elevation/azimuth timing signals
+//    Default mode: auto-scan (2'b01). Change to 2'b00 for STM32 pass-through.
+radar_mode_controller rmc (
+    .clk(clk),
+    .reset_n(reset_n),
+    .mode(host_mode),                     // Controlled by host via USB (default: 2'b01 auto-scan)
+    .stm32_new_chirp(stm32_new_chirp_rx),
+    .stm32_new_elevation(stm32_new_elevation_rx),
+    .stm32_new_azimuth(stm32_new_azimuth_rx),
+    .trigger(host_trigger),           // Single-chirp trigger from host via USB
+    // Gap 2: Runtime-configurable timing from host USB commands
+    .cfg_long_chirp_cycles(host_long_chirp_cycles),
+    .cfg_long_listen_cycles(host_long_listen_cycles),
+    .cfg_guard_cycles(host_guard_cycles),
+    .cfg_short_chirp_cycles(host_short_chirp_cycles),
+    .cfg_short_listen_cycles(host_short_listen_cycles),
+    .cfg_chirps_per_elev(host_chirps_per_elev),
+    .use_long_chirp(use_long_chirp),
+    .mc_new_chirp(mc_new_chirp),
+    .mc_new_elevation(mc_new_elevation),
+    .mc_new_azimuth(mc_new_azimuth),
+    .chirp_count(rmc_chirp_count),
+    .elevation_count(rmc_elevation_count),
+    .azimuth_count(rmc_azimuth_count),
+    .scanning(rmc_scanning),
+    .scan_complete(rmc_scan_complete)
 );
+wire clk_400m;
+
+// NOTE: lvds_to_cmos_400m removed — ad9484_interface_400m now provides
+// the buffered 400MHz DCO clock via adc_dco_bufg, avoiding duplicate
+// IBUFDS instantiations on the same LVDS clock pair.
 
 // 1. ADC + CDC + AGC
 
 // CMOS Output Interface (400MHz Domain)
-wire [7:0] adc_data_cmos;  // 8-bit ADC data (CMOS)
-wire adc_dco_cmos;         // ADC data clock (CMOS, 400MHz)
+wire [7:0] adc_data_cmos;  // 8-bit ADC data (CMOS, from ad9484_interface_400m)
 wire adc_valid;            // Data valid signal
 
-wire [7:0] cdc_data_cmos;  // 8-bit ADC data (CMOS)
-wire cdc_valid;            // Data valid signal
+// ADC power-down control (directly tie low = ADC always on)
+assign adc_pwdn = 1'b0;
 
-
-ad9484_lvds_to_cmos_400m adc (
+ad9484_interface_400m adc (
 	.adc_d_p(adc_d_p),
 	.adc_d_n(adc_d_n),
 	.adc_dco_p(adc_dco_p),
 	.adc_dco_n(adc_dco_n),
+	.sys_clk(clk),
 	.reset_n(reset_n),
-	.adc_data_cmos(adc_data_cmos),
-	.adc_dco_cmos(adc_dco_cmos),
-	.adc_valid(adc_valid),
-	.adc_pwdn(adc_pwdn)
+	.adc_data_400m(adc_data_cmos),
+	.adc_data_valid_400m(adc_valid),
+	.adc_dco_bufg(clk_400m)
 );
 
-cdc_adc_to_processing #(
-    .WIDTH(8),
-    .STAGES(3)
-)cdc(
-    .src_clk(adc_dco_cmos),
-    .dst_clk(clk_400m),
-    .reset_n(reset_n),
-    .src_data(adc_data_cmos),
-    .src_valid(adc_valid),
-    .dst_data(cdc_data_cmos),
-    .dst_valid(cdc_valid)
-);
+// NOTE: The cdc_adc_to_processing instance that was here used src_clk=dst_clk=clk_400m
+// (same clock domain — no crossing). Gray-code CDC on same-clock with fast-changing
+// ADC data corrupts samples because Gray coding only guarantees safe transfer of
+// values that change by 1 LSB at a time. The real 400MHz→100MHz CDC crossing is
+// handled inside ddc_400m_enhanced via CIC decimation + CDC_FIR instances.
+// Removed: cdc_adc_to_processing instance. ADC data now goes directly to DDC.
 
 // 2. DDC Input Interface
 wire signed [17:0] ddc_out_i;
@@ -115,15 +199,14 @@ ddc_400m_enhanced ddc(
     .clk_400m(clk_400m),           // 400MHz clock from ADC DCO
     .clk_100m(clk),           // 100MHz system clock //used by the 2 FIR
     .reset_n(reset_n),
-    .adc_data(cdc_data_cmos),     // ADC data at 400MHz (unsigned 0-255)
-    .adc_data_valid_i(cdc_valid),     // Valid at 400MHz
-    .adc_data_valid_q(cdc_valid),     // Valid at 400MHz
+    .adc_data(adc_data_cmos),     // ADC data at 400MHz (direct from ADC interface)
+    .adc_data_valid_i(adc_valid),     // Valid at 400MHz
+    .adc_data_valid_q(adc_valid),     // Valid at 400MHz
     .baseband_i(ddc_out_i), // I output at 100MHz
     .baseband_q(ddc_out_q), // Q output at 100MHz  
     .baseband_valid_i(ddc_valid_i),     // Valid at 100MHz
 	 .baseband_valid_q(ddc_valid_q),
-	 .mixers_enable(1'b1),
-    .bypass_mode(1'b1)
+ 	 .mixers_enable(1'b1)
 );
 
 ddc_input_interface ddc_if (
@@ -139,7 +222,24 @@ ddc_input_interface ddc_if (
     .data_sync_error()
 );
 
+// 2b. Digital Gain Control (Fix 3)
+// Host-configurable power-of-2 shift between DDC output and matched filter.
+// Default gain_shift=0 → pass-through (no behavioral change from baseline).
+rx_gain_control gain_ctrl (
+    .clk(clk),
+    .reset_n(reset_n),
+    .data_i_in(adc_i_scaled),
+    .data_q_in(adc_q_scaled),
+    .valid_in(adc_valid_sync),
+    .gain_shift(host_gain_shift),
+    .data_i_out(gc_i),
+    .data_q_out(gc_q),
+    .valid_out(gc_valid),
+    .saturation_count(gc_saturation_count)
+);
+
 // 3. Dual Chirp Memory Loader
+wire [9:0] sample_addr_from_chain;
 
 chirp_memory_loader_param chirp_mem (
     .clk(clk),
@@ -163,14 +263,14 @@ always @(posedge clk or negedge reset_n) begin
         if (sample_addr_reg == 1023) sample_addr_reg <= 0;
     end
 end
-assign sample_addr_wire = sample_addr_reg;
+// sample_addr_wire removed — was unused implicit wire (synthesis warning)
 
 // 4. CRITICAL: Reference Chirp Latency Buffer
 // This aligns reference data with FFT output (2159 cycle delay)
 wire [15:0] delayed_ref_i, delayed_ref_q;
 wire mem_ready_delayed;
 
-latency_buffer_2159 #(
+latency_buffer #(
     .DATA_WIDTH(32),  // 16-bit I + 16-bit Q
 	.LATENCY(3187)
 ) ref_latency_buffer (
@@ -189,18 +289,22 @@ assign short_chirp_real = delayed_ref_i;
 assign short_chirp_imag = delayed_ref_q;
 
 // 5. Dual Chirp Matched Filter
-wire [9:0] sample_addr_from_chain; 
 
 wire signed [15:0] range_profile_i;
 wire signed [15:0] range_profile_q;
 wire range_valid;
 
+// Expose matched filter output to top level for USB range profile
+assign range_profile_i_out = range_profile_i;
+assign range_profile_q_out = range_profile_q;
+assign range_profile_valid_out = range_valid;
+
 matched_filter_multi_segment mf_dual (
     .clk(clk),
     .reset_n(reset_n),
-    .ddc_i({{2{adc_i_scaled[15]}}, adc_i_scaled}),
-    .ddc_q({{2{adc_q_scaled[15]}}, adc_q_scaled}),
-    .ddc_valid(adc_valid_sync),
+    .ddc_i({{2{gc_i[15]}}, gc_i}),
+    .ddc_q({{2{gc_q[15]}}, gc_q}),
+    .ddc_valid(gc_valid),
     .use_long_chirp(use_long_chirp),
     .chirp_counter(chirp_counter),
     .mc_new_chirp(mc_new_chirp),
@@ -213,8 +317,6 @@ matched_filter_multi_segment mf_dual (
     .segment_request(segment_request),
     .mem_request(mem_request),
 	 .sample_addr_out(sample_addr_from_chain),
-    .ref_i(16'd0),          // Direct ref to multi_seg
-    .ref_q(16'd0),
     .mem_ready(mem_ready),
     .pc_i_w(range_profile_i),
     .pc_q_w(range_profile_q),
@@ -238,7 +340,30 @@ range_bin_decimator #(
     .range_valid_out(decimated_range_valid),
     .range_bin_index(decimated_range_bin),
     .decimation_mode(2'b01),           // Peak detection mode
-    .start_bin(10'd0)
+    .start_bin(10'd0),
+    .watchdog_timeout()                // Diagnostic — unconnected (monitored via ILA if needed)
+);
+
+// ========== MTI CANCELLER (Ground Clutter Removal) ==========
+// 2-pulse canceller: subtracts previous chirp from current chirp.
+// H(z) = 1 - z^{-1} → null at DC Doppler, removes stationary clutter.
+// When host_mti_enable=0: transparent pass-through.
+mti_canceller #(
+    .NUM_RANGE_BINS(64),
+    .DATA_WIDTH(16)
+) mti_inst (
+    .clk(clk),
+    .reset_n(reset_n),
+    .range_i_in(decimated_range_i),
+    .range_q_in(decimated_range_q),
+    .range_valid_in(decimated_range_valid),
+    .range_bin_in(decimated_range_bin),
+    .range_i_out(mti_range_i),
+    .range_q_out(mti_range_q),
+    .range_valid_out(mti_range_valid),
+    .range_bin_out(mti_range_bin),
+    .mti_enable(host_mti_enable),
+    .mti_first_chirp(mti_first_chirp)
 );
 
 // ========== FRAME SYNC USING chirp_counter ==========
@@ -253,27 +378,17 @@ always @(posedge clk or negedge reset_n) begin
         // Default: no pulse
         new_frame_pulse <= 1'b0;
         
-        // ===== CHOOSE ONE FRAME DETECTION METHOD =====
-        
-        // METHOD A: Detect frame start at chirp_counter = 0
-        // (Assumes frames are 64 chirps: 0-63)
-        //if (chirp_counter == 6'd0 && chirp_counter_prev != 6'd0) begin
-        //    new_frame_pulse <= 1'b1;
-        //end
-        
-        // METHOD B: Detect frame start at chirp_counter = 0 AND 32
-        // (For 32-chirp frames in a 64-chirp sequence)
-         if ((chirp_counter == 6'd0 || chirp_counter == 6'd32) && 
-             (chirp_counter_prev != chirp_counter)) begin
-             new_frame_pulse <= 1'b1;
-         end
-        
-        // METHOD C: Programmable frame start
-        // localparam FRAME_START_CHIRP = 6'd0;  // Set based on your sequence
-        // if (chirp_counter == FRAME_START_CHIRP && 
-        //     chirp_counter_prev != FRAME_START_CHIRP) begin
-        //     new_frame_pulse <= 1'b1;
-        // end
+        // Dynamic frame detection using host_chirps_per_elev.
+        // Detect frame boundary when chirp_counter changes AND is a
+        // multiple of host_chirps_per_elev (0, N, 2N, 3N, ...).
+        // Uses a modulo counter that resets at host_chirps_per_elev.
+        if (chirp_counter != chirp_counter_prev) begin
+            if (chirp_counter == 6'd0 ||
+                chirp_counter == host_chirps_per_elev ||
+                chirp_counter == {host_chirps_per_elev, 1'b0}) begin
+                new_frame_pulse <= 1'b1;
+            end
+        end
         
         // Store previous value
         chirp_counter_prev <= chirp_counter;
@@ -283,8 +398,9 @@ end
 assign new_chirp_frame = new_frame_pulse;
 
 // ========== DATA PACKING FOR DOPPLER ==========
-assign range_data_32bit = {decimated_range_q, decimated_range_i};
-assign range_data_valid = decimated_range_valid;
+// Use MTI-filtered data (or pass-through if MTI disabled)
+assign range_data_32bit = {mti_range_q, mti_range_i};
+assign range_data_valid = mti_range_valid;
 
 // ========== DOPPLER PROCESSOR ==========
 doppler_processor_optimized #(
@@ -302,7 +418,7 @@ doppler_processor_optimized #(
     .doppler_output(doppler_output),
     .doppler_valid(doppler_valid),
     .doppler_bin(doppler_bin),
-    .range_bin(doppler_range_bin_out),
+    .range_bin(range_bin),
     
     // Status
     .processing_active(doppler_processing),
@@ -311,9 +427,8 @@ doppler_processor_optimized #(
 );
 
 // ========== OUTPUT CONNECTIONS ==========
-assign doppler_range_bin = doppler_range_bin_out;
-assign doppler_processing_active = doppler_processing;
-assign doppler_frame_complete = doppler_frame_done;
+// doppler_output, doppler_valid, doppler_bin, range_bin are directly
+// connected to doppler_proc ports above
 
 // ========== STATUS ==========
 
@@ -335,19 +450,27 @@ always @(posedge clk or negedge reset_n) begin
         // Detect frame completion
         if (new_chirp_frame) begin
             frame_counter <= frame_counter + 1;
+            `ifdef SIMULATION
             $display("[TOP] Frame %0d started. Previous frame had %0d chirps", 
                      frame_counter, chirps_in_current_frame);
+            `endif
             chirps_in_current_frame <= 0;
         end
         
         // Monitor chirp counter pattern
         if (chirp_counter != chirp_counter_prev) begin
+            `ifdef SIMULATION
             $display("[TOP] chirp_counter: %0d ? %0d", 
                      chirp_counter_prev, chirp_counter);
+            `endif
         end
     end
 end
 
 
+// ========== ADC DEBUG TAP (for self-test / bring-up) ==========
+assign dbg_adc_i     = adc_i_scaled;
+assign dbg_adc_q     = adc_q_scaled;
+assign dbg_adc_valid = adc_valid_sync;
 
 endmodule

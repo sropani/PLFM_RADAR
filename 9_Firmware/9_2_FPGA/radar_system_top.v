@@ -77,7 +77,7 @@ module radar_system_top (
     
     // Data bus
     inout wire [31:0] ft601_data,         // 32-bit bidirectional data bus
-    output wire [1:0] ft601_be,            // Byte enable
+    output wire [3:0] ft601_be,            // Byte enable (4 lanes for 32-bit mode)
     
     // Control signals
     output wire ft601_txe_n,                // Transmit enable (active low)
@@ -132,15 +132,24 @@ wire clk_100m_buf;
 wire clk_120m_dac_buf;
 wire ft601_clk_buf;
 wire sys_reset_n;
+wire sys_reset_120m_n;  // Reset synchronized to clk_120m_dac domain
+wire sys_reset_ft601_n; // Reset synchronized to ft601_clk domain
+
+// CDC: synchronized versions of async inputs for status_reg
+wire stm32_mixers_enable_100m;  // stm32_mixers_enable sync'd to clk_100m
+wire ft601_txe_100m;            // ft601_txe sync'd to clk_100m
 
 // Transmitter internal signals
 wire [7:0] tx_chirp_data;
 wire tx_chirp_valid;
 wire tx_chirp_done;
-wire tx_new_chirp_frame;
+wire tx_new_chirp_frame;        // In clk_120m_dac domain
+wire tx_new_chirp_frame_sync;   // Synchronized to clk_100m domain
 wire [5:0] tx_current_elevation;
 wire [5:0] tx_current_azimuth;
-wire [5:0] tx_current_chirp;
+wire [5:0] tx_current_chirp;       // In clk_120m_dac domain
+wire [5:0] tx_current_chirp_sync;  // Synchronized to clk_100m domain
+wire tx_current_chirp_sync_valid;
 
 // Receiver internal signals
 wire [31:0] rx_doppler_output;
@@ -152,8 +161,16 @@ wire rx_range_valid;
 wire [15:0] rx_doppler_real;
 wire [15:0] rx_doppler_imag;
 wire rx_doppler_data_valid;
-wire rx_cfar_detection;
-wire rx_cfar_valid;
+reg rx_detect_flag;       // Threshold detection result (was rx_cfar_detection)
+reg rx_detect_valid;      // Detection valid pulse (was rx_cfar_valid)
+
+// Frame-complete signal from Doppler processor (for CFAR)
+wire rx_frame_complete;
+
+// ADC debug tap from receiver (clk_100m domain, post-DDC)
+wire [15:0] rx_dbg_adc_i;
+wire [15:0] rx_dbg_adc_q;
+wire        rx_dbg_adc_valid;
 
 // Data packing for USB
 wire [31:0] usb_range_profile;
@@ -161,16 +178,95 @@ wire usb_range_valid;
 wire [15:0] usb_doppler_real;
 wire [15:0] usb_doppler_imag;
 wire usb_doppler_valid;
-wire usb_cfar_detection;
-wire usb_cfar_valid;
+wire usb_detect_flag;     // (was usb_cfar_detection)
+wire usb_detect_valid;    // (was usb_cfar_valid)
 
 // System status
 reg [3:0] status_reg;
+
+// USB host command outputs (Gap 4: USB Read Path)
+// These are in the ft601_clk domain; CDC'd to clk_100m below
+wire [31:0] usb_cmd_data;
+wire        usb_cmd_valid;     // 1-cycle pulse in ft601_clk domain
+wire [7:0]  usb_cmd_opcode;
+wire [7:0]  usb_cmd_addr;
+wire [15:0] usb_cmd_value;
+
+// USB command decode registers (clk_100m domain, driven by CDC block below)
+// Declared here (before rx_inst) so Icarus Verilog can resolve forward refs.
+reg [1:0]  host_radar_mode;
+reg        host_trigger_pulse;
+reg [15:0] host_detect_threshold;  // (was host_cfar_threshold)
+reg [2:0]  host_stream_control;
+
+// Fix 3: Digital gain control register
+// [3]=direction: 0=amplify, 1=attenuate. [2:0]=shift amount 0..7.
+// Default 0x00 = pass-through (no gain change).
+reg [3:0]  host_gain_shift;
+
+// Gap 2: Host-configurable chirp timing registers
+// These override the compile-time defaults in radar_mode_controller when
+// written via USB command. Defaults match the parameter values in
+// radar_mode_controller.v so behavior is unchanged until the host writes them.
+reg [15:0] host_long_chirp_cycles;    // Opcode 0x10 (default 3000)
+reg [15:0] host_long_listen_cycles;   // Opcode 0x11 (default 13700)
+reg [15:0] host_guard_cycles;         // Opcode 0x12 (default 17540)
+reg [15:0] host_short_chirp_cycles;   // Opcode 0x13 (default 50)
+reg [15:0] host_short_listen_cycles;  // Opcode 0x14 (default 17450)
+reg [5:0]  host_chirps_per_elev;      // Opcode 0x15 (default 32)
+reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
+
+// Fix 4: Doppler/chirps mismatch protection
+// DOPPLER_FFT_SIZE is compile-time (32). If host sets chirps_per_elev to a
+// different value, Doppler accumulation is corrupted. Clamp at command decode
+// and flag the mismatch so the host knows.
+localparam DOPPLER_FFT_SIZE = 32;     // Must match doppler_processor parameter
+reg        chirps_mismatch_error;     // Set if host tried to set chirps != FFT size
+
+// Fix 7: Range-mode register (opcode 0x20)
+// Future-proofing for 3km/10km antenna switching.
+//   2'b00 = Auto (default — system selects based on scene)
+//   2'b01 = Short-range (3km)
+//   2'b10 = Long-range (10km)
+//   2'b11 = Reserved
+// Currently a configuration store only — antenna/timing switching TBD.
+reg [1:0]  host_range_mode;
+
+// CFAR configuration registers (host-configurable via USB)
+reg [3:0]  host_cfar_guard;       // Opcode 0x21: guard cells per side (0..8)
+reg [4:0]  host_cfar_train;       // Opcode 0x22: training cells per side (1..16)
+reg [7:0]  host_cfar_alpha;       // Opcode 0x23: threshold multiplier (Q4.4)
+reg [1:0]  host_cfar_mode;        // Opcode 0x24: 00=CA, 01=GO, 10=SO
+reg        host_cfar_enable;      // Opcode 0x25: 1=CFAR, 0=simple threshold
+
+// Ground clutter removal registers (host-configurable via USB)
+reg        host_mti_enable;       // Opcode 0x26: 1=MTI active, 0=pass-through
+reg [2:0]  host_dc_notch_width;   // Opcode 0x27: DC notch ±width bins (0=off, 1..7)
+
+// Board bring-up self-test registers (opcode 0x30 trigger, 0x31 readback)
+reg        host_self_test_trigger;  // Opcode 0x30: self-clearing pulse
+wire       self_test_busy;
+wire       self_test_result_valid;
+wire [4:0] self_test_result_flags;  // Per-test PASS(1)/FAIL(0)
+wire [7:0] self_test_result_detail; // Diagnostic detail byte
+// Self-test latched results (hold until next trigger)
+reg  [4:0] self_test_flags_latched;
+reg  [7:0] self_test_detail_latched;
+// Self-test ADC capture wires
+wire       self_test_capture_active;
+wire [15:0] self_test_capture_data;
+wire       self_test_capture_valid;
 
 // ============================================================================
 // CLOCK BUFFERING
 // ============================================================================
 
+`ifdef SIMULATION
+// In simulation (iverilog), BUFG is not available — pass-through assigns
+assign clk_100m_buf     = clk_100m;
+assign clk_120m_dac_buf = clk_120m_dac;
+assign ft601_clk_buf    = ft601_clk_in;
+`else
 BUFG bufg_100m (
     .I(clk_100m),
     .O(clk_100m_buf)
@@ -185,9 +281,10 @@ BUFG bufg_ft601 (
     .I(ft601_clk_in),
     .O(ft601_clk_buf)
 );
+`endif
 
-// Reset synchronization
-reg [1:0] reset_sync;
+// Reset synchronization (clk_100m domain)
+(* ASYNC_REG = "TRUE" *) reg [1:0] reset_sync;
 always @(posedge clk_100m_buf or negedge reset_n) begin
     if (!reset_n) begin
         reset_sync <= 2'b00;
@@ -197,6 +294,106 @@ always @(posedge clk_100m_buf or negedge reset_n) begin
 end
 assign sys_reset_n = reset_sync[1];
 
+// Reset synchronization (clk_120m_dac domain)
+// Ensures reset deassertion is synchronous to the DAC clock,
+// preventing recovery/removal timing violations on 120 MHz FFs.
+(* ASYNC_REG = "TRUE" *) reg [1:0] reset_sync_120m;
+always @(posedge clk_120m_dac_buf or negedge reset_n) begin
+    if (!reset_n) begin
+        reset_sync_120m <= 2'b00;
+    end else begin
+        reset_sync_120m <= {reset_sync_120m[0], 1'b1};
+    end
+end
+assign sys_reset_120m_n = reset_sync_120m[1];
+
+// Reset synchronization (ft601_clk domain)
+// FT601 has its own asynchronous clock from the USB controller.
+// All FT601-domain registers need a properly synchronized reset.
+(* ASYNC_REG = "TRUE" *) reg [2:0] reset_sync_ft601;  // 3-stage for better MTBF
+always @(posedge ft601_clk_buf or negedge reset_n) begin
+    if (!reset_n) begin
+        reset_sync_ft601 <= 3'b000;
+    end else begin
+        reset_sync_ft601 <= {reset_sync_ft601[1:0], 1'b1};
+    end
+end
+assign sys_reset_ft601_n = reset_sync_ft601[2];
+
+// CDC synchronizers for status_reg inputs (async -> clk_100m)
+// stm32_mixers_enable is an async GPIO; ft601_txe is on ft601_clk domain
+cdc_single_bit #(.STAGES(2)) cdc_mixers_en_status (
+    .src_clk(clk_100m_buf),           // Pseudo-source for async GPIO
+    .dst_clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+    .src_signal(stm32_mixers_enable),
+    .dst_signal(stm32_mixers_enable_100m)
+);
+
+cdc_single_bit #(.STAGES(2)) cdc_ft601_txe_status (
+    .src_clk(ft601_clk_buf),
+    .dst_clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+    .src_signal(ft601_txe),
+    .dst_signal(ft601_txe_100m)
+);
+
+// ============================================================================
+// CLOCK DOMAIN CROSSING: TRANSMITTER (120 MHz) -> SYSTEM (100 MHz)
+// ============================================================================
+
+// CDC for chirp_counter: 6-bit multi-bit Gray-code synchronizer
+// Source domain is clk_120m_dac, so reset must be synchronized to that domain.
+// The cdc_adc_to_processing module uses synchronous reset internally, so
+// using sys_reset_120m_n (120m-synchronized) is correct for the source side.
+// The destination side will sample it synchronously on dst_clk, which at worst
+// delays reset deassertion by 1-2 cycles — acceptable for CDC reset.
+cdc_adc_to_processing #(
+    .WIDTH(6),
+    .STAGES(3)
+) cdc_chirp_counter (
+    .src_clk(clk_120m_dac_buf),
+    .dst_clk(clk_100m_buf),
+    .src_reset_n(sys_reset_120m_n),
+    .dst_reset_n(sys_reset_n),
+    .src_data(tx_current_chirp),
+    .src_valid(1'b1),           // Always valid — counter updates continuously
+    .dst_data(tx_current_chirp_sync),
+    .dst_valid(tx_current_chirp_sync_valid)
+);
+
+// CDC for new_chirp_frame: toggle CDC (pulse on clk_120m -> pulse on clk_100m)
+// new_chirp_frame is a 1-cycle pulse on clk_120m_dac. A level synchronizer
+// at 100 MHz can miss it. Toggle CDC converts pulse -> level toggle,
+// synchronizes the toggle, then detects edges to recover the pulse.
+reg chirp_frame_toggle_120m;
+always @(posedge clk_120m_dac_buf or negedge sys_reset_120m_n) begin
+    if (!sys_reset_120m_n)
+        chirp_frame_toggle_120m <= 1'b0;
+    else if (tx_new_chirp_frame)
+        chirp_frame_toggle_120m <= ~chirp_frame_toggle_120m;
+end
+
+wire chirp_frame_toggle_100m;
+cdc_single_bit #(
+    .STAGES(3)
+) cdc_new_chirp_frame (
+    .src_clk(clk_120m_dac_buf),
+    .dst_clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+    .src_signal(chirp_frame_toggle_120m),
+    .dst_signal(chirp_frame_toggle_100m)
+);
+
+reg chirp_frame_toggle_100m_prev;
+always @(posedge clk_100m_buf or negedge sys_reset_n) begin
+    if (!sys_reset_n)
+        chirp_frame_toggle_100m_prev <= 1'b0;
+    else
+        chirp_frame_toggle_100m_prev <= chirp_frame_toggle_100m;
+end
+assign tx_new_chirp_frame_sync = chirp_frame_toggle_100m ^ chirp_frame_toggle_100m_prev;
+
 // ============================================================================
 // RADAR TRANSMITTER INSTANTIATION
 // ============================================================================
@@ -205,7 +402,8 @@ radar_transmitter tx_inst (
     // System Clocks
     .clk_100m(clk_100m_buf),
     .clk_120m_dac(clk_120m_dac_buf),
-    .reset_n(sys_reset_n),
+    .reset_n(sys_reset_120m_n),    // 120 MHz-synchronized reset for DAC-domain logic
+    .reset_100m_n(sys_reset_n),    // 100 MHz-synchronized reset for edge detectors/CDC
     
     // DAC Interface
     .dac_data(dac_data),
@@ -271,6 +469,9 @@ radar_receiver_final rx_inst (
     .clk(clk_100m_buf),
     .reset_n(sys_reset_n),
     
+    // Chirp counter from transmitter (CDC-synchronized from 120 MHz domain)
+    .chirp_counter(tx_current_chirp_sync),
+    
     // ADC Physical Interface
     .adc_d_p(adc_d_p),
     .adc_d_n(adc_d_n),
@@ -282,7 +483,40 @@ radar_receiver_final rx_inst (
     .doppler_output(rx_doppler_output),
     .doppler_valid(rx_doppler_valid),
     .doppler_bin(rx_doppler_bin),
-    .range_bin(rx_range_bin)
+    .range_bin(rx_range_bin),
+    
+    // Matched filter range profile (for USB)
+    .range_profile_i_out(rx_range_profile[15:0]),
+    .range_profile_q_out(rx_range_profile[31:16]),
+    .range_profile_valid_out(rx_range_valid),
+    
+    // Host command inputs (Gap 4: USB Read Path)
+    .host_mode(host_radar_mode),
+    .host_trigger(host_trigger_pulse),
+    // Gap 2: Host-configurable chirp timing
+    .host_long_chirp_cycles(host_long_chirp_cycles),
+    .host_long_listen_cycles(host_long_listen_cycles),
+    .host_guard_cycles(host_guard_cycles),
+    .host_short_chirp_cycles(host_short_chirp_cycles),
+    .host_short_listen_cycles(host_short_listen_cycles),
+    .host_chirps_per_elev(host_chirps_per_elev),
+    // Fix 3: digital gain control
+    .host_gain_shift(host_gain_shift),
+    // STM32 toggle signals for RX mode controller (mode 00 pass-through).
+    // These are the raw GPIO inputs — the RX mode controller's edge detectors
+    // (inside radar_mode_controller) handle debouncing/edge detection.
+    .stm32_new_chirp_rx(stm32_new_chirp),
+    .stm32_new_elevation_rx(stm32_new_elevation),
+    .stm32_new_azimuth_rx(stm32_new_azimuth),
+    // CFAR: Doppler frame-complete pulse
+    .doppler_frame_done_out(rx_frame_complete),
+    // Ground clutter removal
+    .host_mti_enable(host_mti_enable),
+    .host_dc_notch_width(host_dc_notch_width),
+    // ADC debug tap (for self-test / bring-up)
+    .dbg_adc_i(rx_dbg_adc_i),
+    .dbg_adc_q(rx_dbg_adc_q),
+    .dbg_adc_valid(rx_dbg_adc_valid)
 );
 
 // ============================================================================
@@ -295,29 +529,118 @@ assign rx_doppler_real = rx_doppler_output[15:0];
 assign rx_doppler_imag = rx_doppler_output[31:16];
 assign rx_doppler_data_valid = rx_doppler_valid;
 
-// For this implementation, we'll create a simple CFAR detection simulation
-// In a real system, this would come from a CFAR module
-reg [7:0] cfar_counter;
+// ============================================================================
+// DC NOTCH FILTER (post-Doppler-FFT, pre-CFAR)
+// ============================================================================
+// Zeros out Doppler bins within ±host_dc_notch_width of DC (bin 0).
+// In a 32-point FFT, DC is bin 0; negative Doppler wraps to bins 31,30,...
+// notch_width=1 → zero bins {0}. notch_width=2 → zero bins {0,1,31}. etc.
+// When host_dc_notch_width=0: pass-through (no zeroing).
+
+wire dc_notch_active;
+wire [4:0] dop_bin_unsigned = rx_doppler_bin;
+assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
+                          (dop_bin_unsigned < {2'b0, host_dc_notch_width} ||
+                           dop_bin_unsigned > (5'd31 - {2'b0, host_dc_notch_width} + 5'd1));
+
+// Notched Doppler data: zero I/Q when in notch zone, pass through otherwise
+wire [31:0] notched_doppler_data  = dc_notch_active ? 32'd0 : rx_doppler_output;
+wire        notched_doppler_valid = rx_doppler_valid;
+wire [4:0]  notched_doppler_bin   = rx_doppler_bin;
+wire [5:0]  notched_range_bin     = rx_range_bin;
+
+// ============================================================================
+// CFAR DETECTOR (replaces simple threshold detector)
+// ============================================================================
+// Cell-Averaging CFAR with CA/GO/SO modes. When cfg_cfar_enable=0,
+// falls back to simple magnitude threshold (backward-compatible).
+// See cfar_ca.v for architecture details.
+
+wire cfar_detect_flag;
+wire cfar_detect_valid;
+wire [5:0]  cfar_detect_range;
+wire [4:0]  cfar_detect_doppler;
+wire [16:0] cfar_detect_magnitude;
+wire [16:0] cfar_detect_threshold;
+wire [15:0] cfar_detect_count;
+wire        cfar_busy_w;
+wire [7:0]  cfar_status_w;
+
+cfar_ca cfar_inst (
+    .clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+
+    // Doppler processor outputs (DC-notch filtered)
+    .doppler_data(notched_doppler_data),
+    .doppler_valid(notched_doppler_valid),
+    .doppler_bin_in(notched_doppler_bin),
+    .range_bin_in(notched_range_bin),
+    .frame_complete(rx_frame_complete),
+
+    // Configuration
+    .cfg_guard_cells(host_cfar_guard),
+    .cfg_train_cells(host_cfar_train),
+    .cfg_alpha(host_cfar_alpha),
+    .cfg_cfar_mode(host_cfar_mode),
+    .cfg_cfar_enable(host_cfar_enable),
+    .cfg_simple_threshold(host_detect_threshold),
+
+    // Detection outputs
+    .detect_flag(cfar_detect_flag),
+    .detect_valid(cfar_detect_valid),
+    .detect_range(cfar_detect_range),
+    .detect_doppler(cfar_detect_doppler),
+    .detect_magnitude(cfar_detect_magnitude),
+    .detect_threshold(cfar_detect_threshold),
+
+    // Status
+    .detect_count(cfar_detect_count),
+    .cfar_busy(cfar_busy_w),
+    .cfar_status(cfar_status_w)
+);
+
+// Connect CFAR outputs to existing detection signals
+// (rx_detect_flag/valid are regs — drive them from CFAR combinationally)
 always @(posedge clk_100m_buf or negedge sys_reset_n) begin
     if (!sys_reset_n) begin
-        cfar_counter <= 8'd0;
-        rx_cfar_detection <= 1'b0;
-        rx_cfar_valid <= 1'b0;
+        rx_detect_flag  <= 1'b0;
+        rx_detect_valid <= 1'b0;
     end else begin
-        rx_cfar_valid <= 1'b0;
-        
-        // Simple threshold detection on doppler magnitude
-        if (rx_doppler_valid) begin
-            // Calculate approximate magnitude (|I| + |Q|)
-            wire [16:0] mag = (rx_doppler_real[15] ? -rx_doppler_real : rx_doppler_real) +
-                              (rx_doppler_imag[15] ? -rx_doppler_imag : rx_doppler_imag);
-            
-            // Threshold detection
-            if (mag > 17'd10000) begin
-                rx_cfar_detection <= 1'b1;
-                rx_cfar_valid <= 1'b1;
-                cfar_counter <= cfar_counter + 1;
-            end
+        rx_detect_flag  <= cfar_detect_flag;
+        rx_detect_valid <= cfar_detect_valid;
+    end
+end
+
+// ============================================================================
+// BOARD BRING-UP SELF-TEST (opcode 0x30 trigger, 0x31 readback)
+// ============================================================================
+// Exercises key subsystems independently on first power-on.
+// ADC data input is tied to real ADC data.
+
+fpga_self_test self_test_inst (
+    .clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+    .trigger(host_self_test_trigger),
+    .busy(self_test_busy),
+    .result_valid(self_test_result_valid),
+    .result_flags(self_test_result_flags),
+    .result_detail(self_test_result_detail),
+    .adc_data_in(rx_dbg_adc_i),   // Post-DDC I channel (clk_100m, 16-bit signed)
+    .adc_valid_in(rx_dbg_adc_valid), // DDC output valid (clk_100m)
+    .capture_active(self_test_capture_active),
+    .capture_data(self_test_capture_data),
+    .capture_valid(self_test_capture_valid)
+);
+
+// Latch self-test results when valid (hold until next trigger)
+always @(posedge clk_100m_buf or negedge sys_reset_n) begin
+    if (!sys_reset_n) begin
+        self_test_flags_latched  <= 5'b00000;
+        self_test_detail_latched <= 8'd0;
+    end else begin
+        if (self_test_result_valid) begin
+            self_test_flags_latched  <= self_test_result_flags;
+            self_test_detail_latched <= self_test_result_detail;
         end
     end
 end
@@ -326,17 +649,16 @@ end
 // DATA PACKING FOR USB
 // ============================================================================
 
-// For range profile, we'll use the doppler data as a placeholder
-// In a real system, this would come from the matched filter output
-assign usb_range_profile = rx_doppler_output;
-assign usb_range_valid = rx_doppler_valid;
+// Range profile from matched filter output (wired through radar_receiver_final)
+assign usb_range_profile = rx_range_profile;
+assign usb_range_valid = rx_range_valid;
 
 assign usb_doppler_real = rx_doppler_real;
 assign usb_doppler_imag = rx_doppler_imag;
 assign usb_doppler_valid = rx_doppler_valid;
 
-assign usb_cfar_detection = rx_cfar_detection;
-assign usb_cfar_valid = rx_cfar_valid;
+assign usb_detect_flag  = rx_detect_flag;
+assign usb_detect_valid = rx_detect_valid;
 
 // ============================================================================
 // USB DATA INTERFACE INSTANTIATION
@@ -345,6 +667,7 @@ assign usb_cfar_valid = rx_cfar_valid;
 usb_data_interface usb_inst (
     .clk(clk_100m_buf),
     .reset_n(sys_reset_n),
+    .ft601_reset_n(sys_reset_ft601_n),  // FT601-domain synchronized reset
     
     // Radar data inputs
     .range_profile(usb_range_profile),
@@ -352,8 +675,8 @@ usb_data_interface usb_inst (
     .doppler_real(usb_doppler_real),
     .doppler_imag(usb_doppler_imag),
     .doppler_valid(usb_doppler_valid),
-    .cfar_detection(usb_cfar_detection),
-    .cfar_valid(usb_cfar_valid),
+    .cfar_detection(usb_detect_flag),
+    .cfar_valid(usb_detect_valid),
     
     // FT601 Interface
     .ft601_data(ft601_data),
@@ -369,8 +692,163 @@ usb_data_interface usb_inst (
     .ft601_srb(ft601_srb),
     .ft601_swb(ft601_swb),
     .ft601_clk_out(ft601_clk_out),
-    .ft601_clk_in(ft601_clk_buf)
+    .ft601_clk_in(ft601_clk_buf),
+    
+    // Host command outputs (Gap 4: USB Read Path)
+    .cmd_data(usb_cmd_data),
+    .cmd_valid(usb_cmd_valid),
+    .cmd_opcode(usb_cmd_opcode),
+    .cmd_addr(usb_cmd_addr),
+    .cmd_value(usb_cmd_value),
+
+    // Gap 2: Stream control (clk_100m domain, CDC'd inside usb_data_interface)
+    .stream_control(host_stream_control),
+
+    // Gap 2: Status readback inputs
+    .status_request(host_status_request),
+    .status_cfar_threshold(host_detect_threshold),
+    .status_stream_ctrl(host_stream_control),
+    .status_radar_mode(host_radar_mode),
+    .status_long_chirp(host_long_chirp_cycles),
+    .status_long_listen(host_long_listen_cycles),
+    .status_guard(host_guard_cycles),
+    .status_short_chirp(host_short_chirp_cycles),
+    .status_short_listen(host_short_listen_cycles),
+    .status_chirps_per_elev(host_chirps_per_elev),
+    .status_range_mode(host_range_mode),
+
+    // Self-test status readback
+    .status_self_test_flags(self_test_flags_latched),
+    .status_self_test_detail(self_test_detail_latched),
+    .status_self_test_busy(self_test_busy)
 );
+
+// ============================================================================
+// USB COMMAND CDC: ft601_clk → clk_100m (Gap 4: USB Read Path)
+// ============================================================================
+// cmd_valid is a 1-cycle pulse in ft601_clk. Use toggle CDC (same pattern
+// as chirp_frame_toggle_120m above) to safely transfer it to clk_100m.
+// cmd_data/opcode/addr/value are held stable after cmd_valid pulses, so
+// we simply sample them in clk_100m when the CDC'd pulse arrives.
+
+// Step 1: Toggle on cmd_valid pulse (ft601_clk domain)
+reg cmd_valid_toggle_ft601;
+always @(posedge ft601_clk_buf or negedge sys_reset_ft601_n) begin
+    if (!sys_reset_ft601_n)
+        cmd_valid_toggle_ft601 <= 1'b0;
+    else if (usb_cmd_valid)
+        cmd_valid_toggle_ft601 <= ~cmd_valid_toggle_ft601;
+end
+
+// Step 2: Synchronize toggle to clk_100m domain (3-stage)
+wire cmd_valid_toggle_100m;
+cdc_single_bit #(
+    .STAGES(3)
+) cdc_cmd_valid (
+    .src_clk(ft601_clk_buf),
+    .dst_clk(clk_100m_buf),
+    .reset_n(sys_reset_n),
+    .src_signal(cmd_valid_toggle_ft601),
+    .dst_signal(cmd_valid_toggle_100m)
+);
+
+// Step 3: Edge-detect toggle to recover pulse in clk_100m domain
+reg cmd_valid_toggle_100m_prev;
+always @(posedge clk_100m_buf or negedge sys_reset_n) begin
+    if (!sys_reset_n)
+        cmd_valid_toggle_100m_prev <= 1'b0;
+    else
+        cmd_valid_toggle_100m_prev <= cmd_valid_toggle_100m;
+end
+wire cmd_valid_100m = cmd_valid_toggle_100m ^ cmd_valid_toggle_100m_prev;
+
+// Step 4: Command decode registers in clk_100m domain
+// Sample cmd_data fields when CDC'd valid pulse arrives. Data is stable
+// because the read FSM holds cmd_opcode/addr/value until the next command.
+// NOTE: reg declarations for host_radar_mode, host_trigger_pulse,
+// host_detect_threshold, host_stream_control are in INTERNAL SIGNALS section
+// above (before rx_inst) to avoid Icarus Verilog forward-reference errors.
+
+always @(posedge clk_100m_buf or negedge sys_reset_n) begin
+    if (!sys_reset_n) begin
+        host_radar_mode    <= 2'b01;   // Default: auto-scan
+        host_trigger_pulse <= 1'b0;
+        host_detect_threshold <= 16'd10000; // Default threshold
+        host_stream_control <= 3'b111;    // Default: all streams enabled
+        host_gain_shift     <= 4'd0;      // Default: pass-through (no gain change)
+        // Gap 2: chirp timing defaults (match radar_mode_controller parameters)
+        host_long_chirp_cycles  <= 16'd3000;
+        host_long_listen_cycles <= 16'd13700;
+        host_guard_cycles       <= 16'd17540;
+        host_short_chirp_cycles <= 16'd50;
+        host_short_listen_cycles <= 16'd17450;
+        host_chirps_per_elev    <= 6'd32;
+        host_status_request     <= 1'b0;
+        chirps_mismatch_error   <= 1'b0;
+        host_range_mode         <= 2'b00;     // Default: auto
+        // CFAR defaults (disabled by default — backward-compatible)
+        host_cfar_guard         <= 4'd2;      // 2 guard cells each side
+        host_cfar_train         <= 5'd8;      // 8 training cells each side
+        host_cfar_alpha         <= 8'h30;     // alpha=3.0 (Q4.4)
+        host_cfar_mode          <= 2'b00;     // CA-CFAR
+        host_cfar_enable        <= 1'b0;      // Disabled (simple threshold)
+        // Ground clutter removal defaults (disabled — backward-compatible)
+        host_mti_enable         <= 1'b0;      // MTI off
+        host_dc_notch_width     <= 3'd0;      // DC notch off
+        // Self-test defaults
+        host_self_test_trigger  <= 1'b0;      // Self-test idle
+    end else begin
+        host_trigger_pulse <= 1'b0;    // Self-clearing pulse
+        host_status_request <= 1'b0;   // Self-clearing pulse
+        host_self_test_trigger <= 1'b0;  // Self-clearing pulse
+        if (cmd_valid_100m) begin
+            case (usb_cmd_opcode)
+                8'h01: host_radar_mode     <= usb_cmd_value[1:0];
+                8'h02: host_trigger_pulse  <= 1'b1;
+                8'h03: host_detect_threshold <= usb_cmd_value;
+                8'h04: host_stream_control <= usb_cmd_value[2:0];
+                // Gap 2: chirp timing configuration
+                8'h10: host_long_chirp_cycles  <= usb_cmd_value;
+                8'h11: host_long_listen_cycles <= usb_cmd_value;
+                8'h12: host_guard_cycles       <= usb_cmd_value;
+                8'h13: host_short_chirp_cycles <= usb_cmd_value;
+                8'h14: host_short_listen_cycles <= usb_cmd_value;
+                8'h15: begin
+                    // Fix 4: Clamp chirps_per_elev to DOPPLER_FFT_SIZE.
+                    // If host requests a different value, clamp and set error flag.
+                    if (usb_cmd_value[5:0] > DOPPLER_FFT_SIZE[5:0]) begin
+                        host_chirps_per_elev  <= DOPPLER_FFT_SIZE[5:0];
+                        chirps_mismatch_error <= 1'b1;
+                    end else if (usb_cmd_value[5:0] == 6'd0) begin
+                        host_chirps_per_elev  <= DOPPLER_FFT_SIZE[5:0];
+                        chirps_mismatch_error <= 1'b1;
+                    end else begin
+                        host_chirps_per_elev  <= usb_cmd_value[5:0];
+                        // Clear error only if value matches FFT size exactly
+                        chirps_mismatch_error <= (usb_cmd_value[5:0] != DOPPLER_FFT_SIZE[5:0]);
+                    end
+                end
+                8'h16: host_gain_shift         <= usb_cmd_value[3:0];  // Fix 3: digital gain
+                8'h20: host_range_mode         <= usb_cmd_value[1:0];  // Fix 7: range mode
+                // CFAR configuration opcodes
+                8'h21: host_cfar_guard         <= usb_cmd_value[3:0];
+                8'h22: host_cfar_train         <= usb_cmd_value[4:0];
+                8'h23: host_cfar_alpha         <= usb_cmd_value[7:0];
+                8'h24: host_cfar_mode          <= usb_cmd_value[1:0];
+                8'h25: host_cfar_enable        <= usb_cmd_value[0];
+                // Ground clutter removal opcodes
+                8'h26: host_mti_enable         <= usb_cmd_value[0];
+                8'h27: host_dc_notch_width     <= usb_cmd_value[2:0];
+                // Board bring-up self-test opcodes
+                8'h30: host_self_test_trigger  <= 1'b1;  // Trigger self-test
+                8'h31: host_status_request     <= 1'b1;  // Self-test readback (status alias)
+                // 0x31: readback handled via status mechanism (latched results)
+                8'hFF: host_status_request     <= 1'b1;  // Gap 2: status readback
+                default: ;
+            endcase
+        end
+    end
+end
 
 // ============================================================================
 // OUTPUT ASSIGNMENTS
@@ -378,8 +856,8 @@ usb_data_interface usb_inst (
 
 assign current_elevation = tx_current_elevation;
 assign current_azimuth = tx_current_azimuth;
-assign current_chirp = tx_current_chirp;
-assign new_chirp_frame = tx_new_chirp_frame;
+assign current_chirp = tx_current_chirp_sync;        // Use CDC-synchronized version
+assign new_chirp_frame = tx_new_chirp_frame_sync;    // Use CDC-synchronized version
 
 assign dbg_doppler_data = rx_doppler_output;
 assign dbg_doppler_valid = rx_doppler_valid;
@@ -394,10 +872,10 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
     if (!sys_reset_n) begin
         status_reg <= 4'b0000;
     end else begin
-        status_reg[0] <= stm32_mixers_enable;      // Mixers enabled
-        status_reg[1] <= ft601_txe;                 // USB TX ready
+        status_reg[0] <= stm32_mixers_enable_100m;  // Mixers enabled (CDC sync'd)
+        status_reg[1] <= ft601_txe_100m;             // USB TX ready (CDC sync'd)
         status_reg[2] <= rx_doppler_valid;          // Data valid
-        status_reg[3] <= tx_new_chirp_frame;        // New chirp frame
+        status_reg[3] <= tx_new_chirp_frame_sync;   // New chirp frame (CDC-sync'd)
     end
 end
 
@@ -415,7 +893,7 @@ reg [31:0] data_packet_counter;
 always @(posedge clk_100m_buf) begin
     debug_cycle_counter <= debug_cycle_counter + 1;
     
-    if (tx_new_chirp_frame) begin
+    if (tx_new_chirp_frame_sync) begin
         $display("[TOP] New chirp frame started at cycle %0d", debug_cycle_counter);
     end
     

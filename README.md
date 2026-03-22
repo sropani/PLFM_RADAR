@@ -128,6 +128,21 @@ The AERIS-10 main sub-systems are:
 
 ## 🚀 Getting Started
 
+## 🧹 Repository File Placement Policy
+
+To keep the repository root clean and make artifacts easy to find, place generated files in the following locations:
+
+- **Published reports (tracked, GitHub Pages):** `docs/`
+  - Example: `docs/AERIS_Simulation_Report_v2.pdf`
+- **Simulation-generated outputs (local, gitignored):** `5_Simulations/generated/`
+  - Plots, scenario outputs, temporary analysis directories
+- **FPGA/Vivado generated artifacts (local, gitignored):** `9_Firmware/9_2_FPGA/reports/`
+  - VCD/VVP dumps, temporary CSVs, local report snapshots
+- **Reusable FPGA automation scripts (tracked):** `9_Firmware/9_2_FPGA/scripts/`
+  - TCL flows, helper scripts used by build/bring-up
+
+Do not leave generated artifacts in the repository root.
+
 ### Prerequisites
 
 - Basic understanding of radar principles

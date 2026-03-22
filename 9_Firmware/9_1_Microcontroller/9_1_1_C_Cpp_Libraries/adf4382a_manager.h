@@ -5,28 +5,30 @@
 #include "adf4382.h"
 #include "no_os_spi.h"
 
-// GPIO Definitions
-#define TX_CE_Pin        GPIO_PIN_0
-#define TX_CE_GPIO_Port  GPIOG
-#define TX_CS_Pin        GPIO_PIN_1  
-#define TX_CS_GPIO_Port  GPIOG
-#define TX_DELADJ_Pin    GPIO_PIN_2
-#define TX_DELADJ_GPIO_Port GPIOG
-#define TX_DELSTR_Pin    GPIO_PIN_3
-#define TX_DELSTR_GPIO_Port GPIOG
-#define TX_LKDET_Pin     GPIO_PIN_4
-#define TX_LKDET_GPIO_Port GPIOG
-
-#define RX_CE_Pin        GPIO_PIN_5
-#define RX_CE_GPIO_Port  GPIOG
-#define RX_CS_Pin        GPIO_PIN_6
-#define RX_CS_GPIO_Port  GPIOG
+// GPIO Definitions — matched to CubeMX main.h (GPIOG pins 6-15)
+// RX pins: GPIOG pins 6-10
+#define RX_LKDET_Pin     GPIO_PIN_6
+#define RX_LKDET_GPIO_Port GPIOG
 #define RX_DELADJ_Pin    GPIO_PIN_7
 #define RX_DELADJ_GPIO_Port GPIOG
 #define RX_DELSTR_Pin    GPIO_PIN_8
 #define RX_DELSTR_GPIO_Port GPIOG
-#define RX_LKDET_Pin     GPIO_PIN_9
-#define RX_LKDET_GPIO_Port GPIOG
+#define RX_CE_Pin        GPIO_PIN_9
+#define RX_CE_GPIO_Port  GPIOG
+#define RX_CS_Pin        GPIO_PIN_10
+#define RX_CS_GPIO_Port  GPIOG
+
+// TX pins: GPIOG pins 11-15
+#define TX_LKDET_Pin     GPIO_PIN_11
+#define TX_LKDET_GPIO_Port GPIOG
+#define TX_DELSTR_Pin    GPIO_PIN_12
+#define TX_DELSTR_GPIO_Port GPIOG
+#define TX_DELADJ_Pin    GPIO_PIN_13
+#define TX_DELADJ_GPIO_Port GPIOG
+#define TX_CS_Pin        GPIO_PIN_14
+#define TX_CS_GPIO_Port  GPIOG
+#define TX_CE_Pin        GPIO_PIN_15
+#define TX_CE_GPIO_Port  GPIOG
 
 // Frequency definitions
 #define REF_FREQ_HZ      300000000ULL  // 300 MHz

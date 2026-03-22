@@ -59,6 +59,7 @@ extern "C" {
 #include "adf4382.h"
 #include "no_os_delay.h"
 #include "no_os_error.h"
+#include "diag_log.h"
 }
 #include <cmath>
 #include "DAC5578.h"
@@ -113,6 +114,7 @@ SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi4;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;  // B15 fix: DELADJ PWM timer (CH2=TX, CH3=RX)
 
 UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart3;
@@ -209,6 +211,11 @@ uint8_t adc1_readings[8] = {0};
 uint8_t adc2_readings[8] = {0};
 float Idq_reading[16]={0.0f};
 
+/* [GAP-3 FIX 2] Hardware IWDG watchdog handle
+ * Prescaler=256, Reload=500 → timeout ≈ 4.096 s from 32 kHz LSI.
+ * If the main loop stalls, the MCU resets automatically. */
+IWDG_HandleTypeDef hiwdg;
+
 
 // Global manager instance ADF4382A
 ADF4382A_Manager lo_manager;
@@ -260,6 +267,7 @@ void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_TIM3_Init(void);  // B15 fix: DELADJ PWM timer init
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_I2C3_Init(void);
@@ -267,6 +275,7 @@ static void MX_SPI1_Init(void);
 static void MX_SPI4_Init(void);
 static void MX_UART5_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_IWDG_Init(void);  /* GAP-3 FIX 2: hardware watchdog */
 /* USER CODE BEGIN PFP */
 
 // Function prototypes
@@ -329,6 +338,7 @@ extern "C" {
 
     // USB CDC receive callback (called by STM32 HAL)
     void CDC_Receive_FS(uint8_t* Buf, uint32_t *Len) {
+        DIAG("USB", "CDC_Receive_FS callback: %lu bytes received", *Len);
         // Process received USB data
         usbHandler.processUSBData(Buf, *Len);
 
@@ -339,49 +349,67 @@ extern "C" {
 }
 
 void systemPowerUpSequence() {
+    DIAG_SECTION("PWR: systemPowerUpSequence");
     uint8_t msg[] = "Starting Power Up Sequence...\r\n";
     HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 1000);
 
     // Step 1: Initialize ADTR1107 power sequence
+    DIAG("PWR", "Step 1: initializeADTR1107Sequence()");
     if (!adarManager.initializeADTR1107Sequence()) {
+        DIAG_ERR("PWR", "ADTR1107 power sequence FAILED -- calling Error_Handler()");
         uint8_t err[] = "ERROR: ADTR1107 power sequence failed!\r\n";
         HAL_UART_Transmit(&huart3, err, sizeof(err)-1, 1000);
         Error_Handler();
     }
+    DIAG("PWR", "Step 1 OK: ADTR1107 sequence complete");
 
     // Step 2: Initialize all ADAR1000 devices
+    DIAG("PWR", "Step 2: initializeAllDevices()");
     if (!adarManager.initializeAllDevices()) {
+        DIAG_ERR("PWR", "ADAR1000 initialization FAILED -- calling Error_Handler()");
         uint8_t err[] = "ERROR: ADAR1000 initialization failed!\r\n";
         HAL_UART_Transmit(&huart3, err, sizeof(err)-1, 1000);
         Error_Handler();
     }
+    DIAG("PWR", "Step 2 OK: All ADAR1000 devices initialized");
 
     // Step 3: Perform system calibration
+    DIAG("PWR", "Step 3: performSystemCalibration()");
     if (!adarManager.performSystemCalibration()) {
+        DIAG_WARN("PWR", "System calibration returned issues (non-fatal)");
         uint8_t warn[] = "WARNING: System calibration issues\r\n";
         HAL_UART_Transmit(&huart3, warn, sizeof(warn)-1, 1000);
+    } else {
+        DIAG("PWR", "Step 3 OK: System calibration passed");
     }
 
     // Step 4: Set to safe TX mode
+    DIAG("PWR", "Step 4: setAllDevicesTXMode()");
     adarManager.setAllDevicesTXMode();
+    DIAG("PWR", "Step 4 OK: All devices set to TX mode");
 
     uint8_t success[] = "Power Up Sequence Completed Successfully\r\n";
     HAL_UART_Transmit(&huart3, success, sizeof(success)-1, 1000);
+    DIAG("PWR", "systemPowerUpSequence COMPLETE");
 }
 
 void systemPowerDownSequence() {
+    DIAG_SECTION("PWR: systemPowerDownSequence");
     uint8_t msg[] = "Starting Power Down Sequence...\r\n";
     HAL_UART_Transmit(&huart3, msg, sizeof(msg)-1, 1000);
 
     // Step 1: Set all devices to RX mode (safest state)
+    DIAG("PWR", "Step 1: setAllDevicesRXMode()");
     adarManager.setAllDevicesRXMode();
     HAL_Delay(10);
 
     // Step 2: Disable PA power supplies
+    DIAG("PWR", "Step 2: Disable PA 5V supplies (EN_P_5V0_PA1/PA2/PA3 LOW)");
     HAL_GPIO_WritePin(EN_P_5V0_PA1_GPIO_Port, EN_P_5V0_PA1_Pin | EN_P_5V0_PA2_Pin | EN_P_5V0_PA3_Pin, GPIO_PIN_RESET);
     HAL_Delay(10);
 
     // Step 3: Set PA biases to safe values
+    DIAG("PWR", "Step 3: Setting PA bias to safe value 0x20 on all 4 devices, 4 channels each");
     for (uint8_t dev = 0; dev < 4; dev++) {
         adarManager.adarWrite(dev, REG_PA_CH1_BIAS_ON, 0x20, BROADCAST_OFF);
         adarManager.adarWrite(dev, REG_PA_CH2_BIAS_ON, 0x20, BROADCAST_OFF);
@@ -391,22 +419,26 @@ void systemPowerDownSequence() {
     HAL_Delay(10);
 
     // Step 4: Disable LNA power supply
+    DIAG("PWR", "Step 4: Disable LNA 3.3V supply (EN_P_3V3_ADTR LOW)");
     HAL_GPIO_WritePin(EN_P_3V3_ADTR_GPIO_Port, EN_P_3V3_ADTR_Pin, GPIO_PIN_RESET);
     HAL_Delay(10);
 
     // Step 5: Set LNA bias to safe value
+    DIAG("PWR", "Step 5: Setting LNA bias to 0x00 on all 4 devices");
     for (uint8_t dev = 0; dev < 4; dev++) {
         adarManager.adarWrite(dev, REG_LNA_BIAS_ON, 0x00, BROADCAST_OFF);
     }
     HAL_Delay(10);
 
     // Step 6: Disable switch power supplies
+    DIAG("PWR", "Step 6: Disable switch supplies (EN_P_3V3_VDD_SW, EN_P_3V3_SW LOW)");
     HAL_GPIO_WritePin(EN_P_3V3_VDD_SW_GPIO_Port, EN_P_3V3_VDD_SW_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(EN_P_3V3_SW_GPIO_Port, EN_P_3V3_SW_Pin, GPIO_PIN_RESET);
     HAL_Delay(10);
 
     uint8_t success[] = "Power Down Sequence Completed\r\n";
     HAL_UART_Transmit(&huart3, success, sizeof(success)-1, 1000);
+    DIAG("PWR", "systemPowerDownSequence COMPLETE");
 }
 
 void initializeBeamMatrices() {
@@ -443,6 +475,10 @@ void initializeBeamMatrices() {
 }
 
 void executeChirpSequence(int num_chirps, float T1, float PRI1, float T2, float PRI2) {
+    // NOTE: No per-chirp DIAG — this is a us/ns timing-critical path.
+    // Only log entry params for post-mortem analysis.
+    DIAG("SYS", "executeChirpSequence: num_chirps=%d T1=%.2f PRI1=%.2f T2=%.2f PRI2=%.2f",
+         num_chirps, T1, PRI1, T2, PRI2);
     // First chirp sequence (microsecond timing)
     for(int i = 0; i < num_chirps; i++) {
         HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_8); // New chirp signal to FPGA
@@ -471,8 +507,11 @@ void runRadarPulseSequence() {
 
     snprintf(msg, sizeof(msg), "Starting RADAR Sequence #%d\r\n", ++sequence_count);
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 1000);
+    DIAG("SYS", "runRadarPulseSequence #%d: m_max=%d n_max=%d y_max=%d",
+         sequence_count, m_max, n_max, y_max);
 
     // Configure for fast switching
+    DIAG("BF", "Enabling fast-switch mode for beam sweep");
     adarManager.setFastSwitchMode(true);
 
     int m = 1; // Chirp counter
@@ -482,6 +521,7 @@ void runRadarPulseSequence() {
     // Main beam steering sequence
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
     	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// Notify FPGA of elevation change
+    	DIAG("SYS", "Beam pos %d/15: elevation GPIO toggle, patterns matrix1/vector_0/matrix2", beam_pos);
         // Pattern 1: matrix1 (positive steering angles)
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::TX);
         adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::RX);
@@ -512,6 +552,7 @@ void runRadarPulseSequence() {
     }
 
     HAL_GPIO_TogglePin(GPIOD,GPIO_PIN_10);//Tell FPGA that there is a new azimuth
+    DIAG("SYS", "Azimuth GPIO toggle (GPIOD pin 10), stepping motor");
 
     y++; if(y>y_max)y=1;
 	  //Rotate stepper to next y position
@@ -521,11 +562,13 @@ void runRadarPulseSequence() {
 		  HAL_GPIO_WritePin(STEPPER_CLK_P_GPIO_Port, STEPPER_CLK_P_Pin, GPIO_PIN_RESET);
 		  delay_us(500);
 	  }
+    DIAG("MOT", "Stepper moved %d steps for azimuth position y=%d", (int)(Stepper_steps/y_max), y);
 
 
 
     snprintf(msg, sizeof(msg), "RADAR Sequence #%d Completed\r\n", sequence_count);
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 1000);
+    DIAG("SYS", "runRadarPulseSequence #%d COMPLETE", sequence_count);
 }
 
 
@@ -589,9 +632,13 @@ SystemError_t checkSystemHealth(void) {
     // 1. Check AD9523 Clock Generator
     static uint32_t last_clock_check = 0;
     if (HAL_GetTick() - last_clock_check > 5000) {
-        if (HAL_GPIO_ReadPin(AD9523_STATUS0_GPIO_Port, AD9523_STATUS0_Pin) == GPIO_PIN_RESET ||
-            HAL_GPIO_ReadPin(AD9523_STATUS1_GPIO_Port, AD9523_STATUS1_Pin) == GPIO_PIN_RESET) {
+        GPIO_PinState s0 = HAL_GPIO_ReadPin(AD9523_STATUS0_GPIO_Port, AD9523_STATUS0_Pin);
+        GPIO_PinState s1 = HAL_GPIO_ReadPin(AD9523_STATUS1_GPIO_Port, AD9523_STATUS1_Pin);
+        DIAG_GPIO("CLK", "AD9523 STATUS0", s0);
+        DIAG_GPIO("CLK", "AD9523 STATUS1", s1);
+        if (s0 == GPIO_PIN_RESET || s1 == GPIO_PIN_RESET) {
             current_error = ERROR_AD9523_CLOCK;
+            DIAG_ERR("CLK", "AD9523 clock health check FAILED (STATUS0=%d STATUS1=%d)", s0, s1);
         }
         last_clock_check = HAL_GetTick();
     }
@@ -599,20 +646,28 @@ SystemError_t checkSystemHealth(void) {
     // 2. Check ADF4382 Lock Status
     bool tx_locked, rx_locked;
     if (ADF4382A_CheckLockStatus(&lo_manager, &tx_locked, &rx_locked) == ADF4382A_MANAGER_OK) {
-        if (!tx_locked) current_error = ERROR_ADF4382_TX_UNLOCK;
-        if (!rx_locked) current_error = ERROR_ADF4382_RX_UNLOCK;
+        if (!tx_locked) {
+            current_error = ERROR_ADF4382_TX_UNLOCK;
+            DIAG_ERR("LO", "Health check: TX LO UNLOCKED");
+        }
+        if (!rx_locked) {
+            current_error = ERROR_ADF4382_RX_UNLOCK;
+            DIAG_ERR("LO", "Health check: RX LO UNLOCKED");
+        }
     }
 
     // 3. Check ADAR1000 Communication and Temperature
     for (int i = 0; i < 4; i++) {
         if (!adarManager.verifyDeviceCommunication(i)) {
             current_error = ERROR_ADAR1000_COMM;
+            DIAG_ERR("BF", "Health check: ADAR1000 #%d comm FAILED", i);
             break;
         }
 
         float temp = adarManager.readTemperature(i);
         if (temp > 85.0f) {
             current_error = ERROR_ADAR1000_TEMP;
+            DIAG_ERR("BF", "Health check: ADAR1000 #%d OVERTEMP %.1fC > 85C", i, temp);
             break;
         }
     }
@@ -622,6 +677,7 @@ SystemError_t checkSystemHealth(void) {
     if (HAL_GetTick() - last_imu_check > 10000) {
         if (!GY85_Update(&imu)) {
             current_error = ERROR_IMU_COMM;
+            DIAG_ERR("IMU", "Health check: GY85_Update() FAILED");
         }
         last_imu_check = HAL_GetTick();
     }
@@ -632,6 +688,7 @@ SystemError_t checkSystemHealth(void) {
         double pressure = myBMP.getPressure();
         if (pressure < 30000.0 || pressure > 110000.0 || isnan(pressure)) {
             current_error = ERROR_BMP180_COMM;
+            DIAG_ERR("SYS", "Health check: BMP180 pressure out of range: %.0f", pressure);
         }
         last_bmp_check = HAL_GetTick();
     }
@@ -643,6 +700,7 @@ SystemError_t checkSystemHealth(void) {
     }
     if (HAL_GetTick() - last_gps_fix > 30000) {
         current_error = ERROR_GPS_COMM;
+        DIAG_WARN("SYS", "Health check: GPS no fix for >30s");
     }
 
     // 7. Check RF Power Amplifier Current
@@ -650,10 +708,12 @@ SystemError_t checkSystemHealth(void) {
         for (int i = 0; i < 16; i++) {
             if (Idq_reading[i] > 2.5f) {
                 current_error = ERROR_RF_PA_OVERCURRENT;
+                DIAG_ERR("PA", "Health check: PA ch%d OVERCURRENT Idq=%.3fA > 2.5A", i, Idq_reading[i]);
                 break;
             }
             if (Idq_reading[i] < 0.1f) {
                 current_error = ERROR_RF_PA_BIAS;
+                DIAG_ERR("PA", "Health check: PA ch%d BIAS FAULT Idq=%.3fA < 0.1A", i, Idq_reading[i]);
                 break;
             }
         }
@@ -662,20 +722,27 @@ SystemError_t checkSystemHealth(void) {
     // 8. Check System Temperature
     if (temperature > 75.0f) {
         current_error = ERROR_TEMPERATURE_HIGH;
+        DIAG_ERR("SYS", "Health check: System OVERTEMP %.1fC > 75C", temperature);
     }
 
     // 9. Simple watchdog check
     static uint32_t last_health_check = 0;
     if (HAL_GetTick() - last_health_check > 60000) {
         current_error = ERROR_WATCHDOG_TIMEOUT;
+        DIAG_ERR("SYS", "Health check: Watchdog timeout (>60s since last check)");
     }
     last_health_check = HAL_GetTick();
 
+    if (current_error != ERROR_NONE) {
+        DIAG_ERR("SYS", "checkSystemHealth returning error code %d", current_error);
+    }
     return current_error;
 }
 
 // Error recovery function
 void attemptErrorRecovery(SystemError_t error) {
+    DIAG_SECTION("SYS: attemptErrorRecovery");
+    DIAG("SYS", "Attempting recovery from error code %d", error);
     char recovery_msg[80];
     snprintf(recovery_msg, sizeof(recovery_msg),
              "Attempting recovery from error: %d\r\n", error);
@@ -685,46 +752,84 @@ void attemptErrorRecovery(SystemError_t error) {
         case ERROR_ADF4382_TX_UNLOCK:
         case ERROR_ADF4382_RX_UNLOCK:
             // Re-initialize LO
+            DIAG("LO", "Recovery: Re-initializing LO manager (SYNC_METHOD_TIMED)");
             ADF4382A_Manager_Init(&lo_manager, SYNC_METHOD_TIMED);
             HAL_Delay(100);
+            DIAG("LO", "Recovery: LO re-init complete");
             break;
 
         case ERROR_ADAR1000_COMM:
             // Reset ADAR1000 communication
+            DIAG("BF", "Recovery: Re-initializing all ADAR1000 devices");
             adarManager.initializeAllDevices();
             HAL_Delay(50);
+            DIAG("BF", "Recovery: ADAR1000 re-init complete");
             break;
 
         case ERROR_IMU_COMM:
             // Re-initialize IMU
+            DIAG("IMU", "Recovery: Re-initializing GY85 IMU");
             GY85_Init();
             HAL_Delay(100);
+            DIAG("IMU", "Recovery: IMU re-init complete");
             break;
 
         case ERROR_GPS_COMM:
             // GPS will auto-recover when signal returns
+            DIAG("SYS", "Recovery: GPS error -- no action (auto-recover on signal)");
             break;
 
         default:
             // For other errors, just log and continue
+            DIAG_WARN("SYS", "Recovery: No specific handler for error %d", error);
             break;
     }
 
     snprintf(recovery_msg, sizeof(recovery_msg),
              "Recovery attempt completed.\r\n");
     HAL_UART_Transmit(&huart3, (uint8_t*)recovery_msg, strlen(recovery_msg), 1000);
+    DIAG("SYS", "attemptErrorRecovery COMPLETE");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 //:::::RF POWER AMPLIFIER DAC5578 Emergency stop function using CLR pin/////////
 ////////////////////////////////////////////////////////////////////////////////
 void Emergency_Stop(void) {
+    DIAG_ERR("PA", ">>> EMERGENCY_STOP ACTIVATED <<<");
     /* Immediately clear all DAC outputs to zero using hardware CLR */
+    DIAG_ERR("PA", "Clearing DAC1 outputs via CLR pin");
     DAC5578_ActivateClearPin(&hdac1);
+    DIAG_ERR("PA", "Clearing DAC2 outputs via CLR pin");
     DAC5578_ActivateClearPin(&hdac2);
 
-    /* Keep outputs cleared until reset */
+    /* [GAP-3 FIX 1] Cut RF and PA power rails — DAC CLR alone is not enough.
+     * With gate voltage cleared but VDD still energized, PAs can self-bias
+     * or oscillate.  Disable everything in fast-to-slow order:
+     *   1. TX mixers (stop RF immediately)
+     *   2. PA 5V per-element supplies
+     *   3. PA 5.5V bulk supply
+     *   4. RFPA VDD enable
+     */
+    DIAG_ERR("PA", "Disabling TX mixers (GPIOD pin 11 LOW)");
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_RESET);
+
+    DIAG_ERR("PA", "Cutting PA 5V supplies (PA1/PA2/PA3 LOW)");
+    HAL_GPIO_WritePin(EN_P_5V0_PA1_GPIO_Port, EN_P_5V0_PA1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(EN_P_5V0_PA2_GPIO_Port, EN_P_5V0_PA2_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(EN_P_5V0_PA3_GPIO_Port, EN_P_5V0_PA3_Pin, GPIO_PIN_RESET);
+
+    DIAG_ERR("PA", "Cutting PA 5.5V supply (EN_P_5V5_PA LOW)");
+    HAL_GPIO_WritePin(EN_P_5V5_PA_GPIO_Port, EN_P_5V5_PA_Pin, GPIO_PIN_RESET);
+
+    DIAG_ERR("PA", "Disabling RFPA VDD (EN_DIS_RFPA_VDD LOW)");
+    HAL_GPIO_WritePin(EN_DIS_RFPA_VDD_GPIO_Port, EN_DIS_RFPA_VDD_Pin, GPIO_PIN_RESET);
+
+    DIAG_ERR("PA", "All PA rails cut -- entering infinite hold loop (manual reset required)");
+    /* Keep outputs cleared until reset.
+     * MUST refresh IWDG here — otherwise the watchdog would reset the MCU,
+     * re-running startup code which re-energizes PA rails. */
     while (1) {
+        HAL_IWDG_Refresh(&hiwdg);
         HAL_Delay(100);
     }
 }
@@ -735,6 +840,7 @@ void handleSystemError(SystemError_t error) {
 
     error_count++;
     last_error = error;
+    DIAG_ERR("SYS", "handleSystemError: error=%d error_count=%lu", error, error_count);
 
     char error_msg[100];
     const char* error_strings[] = {
@@ -763,6 +869,7 @@ void handleSystemError(SystemError_t error) {
     HAL_UART_Transmit(&huart3, (uint8_t*)error_msg, strlen(error_msg), 1000);
 
     // Blink LED pattern based on error code
+    DIAG("SYS", "Blinking LED3 %d times for error code %d", (error % 5) + 1, error);
     for (int i = 0; i < (error % 5) + 1; i++) {
         HAL_GPIO_TogglePin(LED_3_GPIO_Port, LED_3_Pin);
         HAL_Delay(200);
@@ -770,16 +877,21 @@ void handleSystemError(SystemError_t error) {
 
     // Critical errors trigger emergency shutdown
     if (error >= ERROR_RF_PA_OVERCURRENT && error <= ERROR_POWER_SUPPLY) {
+        DIAG_ERR("SYS", "CRITICAL ERROR (code %d: %s) -- initiating Emergency_Stop()", error, error_strings[error]);
         snprintf(error_msg, sizeof(error_msg),
                  "CRITICAL ERROR! Initiating emergency shutdown.\r\n");
         HAL_UART_Transmit(&huart3, (uint8_t*)error_msg, strlen(error_msg), 1000);
 
-        Emergency_Stop();
+        /* [GAP-3 FIX 5] Set flag BEFORE Emergency_Stop() — the function
+         * never returns (infinite loop), so the line after it was dead code. */
         system_emergency_state = true;
+        Emergency_Stop();
+        /* NOTREACHED — Emergency_Stop() loops forever */
     }
 
     // For non-critical errors, attempt recovery
     if (!system_emergency_state) {
+        DIAG("SYS", "Non-critical error -- attempting recovery");
         attemptErrorRecovery(error);
     }
 }
@@ -790,10 +902,13 @@ bool checkSystemHealthStatus(void) {
     SystemError_t error = checkSystemHealth();
 
     if (error != ERROR_NONE) {
+        DIAG_ERR("SYS", "checkSystemHealthStatus: error detected (code %d), calling handleSystemError()", error);
         handleSystemError(error);
 
         // If we're in emergency state or too many errors, shutdown
         if (system_emergency_state || error_count > 10) {
+            DIAG_ERR("SYS", "checkSystemHealthStatus returning FALSE (emergency=%s error_count=%lu)",
+                     system_emergency_state ? "true" : "false", error_count);
             return false;
         }
     }
@@ -875,8 +990,7 @@ void getSystemStatusForGUI(char* status_buffer, size_t buffer_size) {
     status_buffer[buffer_size - 1] = '\0';
 }
 
-/* ---------- UART printing helpers ---------- */
-/*
+/* ---------- UART printing helpers (Bug #8 FIXED: uncommented) ---------- */
 static void uart_print(const char *msg)
 {
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
@@ -888,7 +1002,6 @@ static void uart_println(const char *msg)
     const char crlf[] = "\r\n";
     HAL_UART_Transmit(&huart3, (uint8_t*)crlf, 2, HAL_MAX_DELAY);
 }
-*/
 
 /* ---------- Helper delay wrappers ---------- */
 static inline void delay_ms(uint32_t ms) { HAL_Delay(ms); }
@@ -1041,34 +1154,59 @@ static int configure_ad9523(void)
 
     init_param.pdata = &pdata;
 
-    // init ad9523 defaults (fills any missing pdata defaults)
-    ad9523_init(&init_param);
-    ret = ad9523_setup(&dev, &init_param);
+    DIAG_SECTION("AD9523 CONFIGURE");
+    DIAG("CLK", "VCXO=%lu Hz, PLL2 N=%d (4*%d+%d)=%d, R2=%d",
+         (unsigned long)pdata.vcxo_freq,
+         4 * pdata.pll2_ndiv_b_cnt + pdata.pll2_ndiv_a_cnt,
+         pdata.pll2_ndiv_b_cnt, pdata.pll2_ndiv_a_cnt,
+         4 * pdata.pll2_ndiv_b_cnt + pdata.pll2_ndiv_a_cnt,
+         pdata.pll2_r2_div);
+    DIAG("CLK", "Enabled channels: 0,1(/12=300M) 4,5(/9=400M) 6(/36=100M) 7(/180=20M) 8,9(/60=60M) 10,11(/30=120M)");
 
+    // init ad9523 defaults (fills any missing pdata defaults)
+    DIAG("CLK", "Calling ad9523_init() -- fills pdata defaults");
+    ad9523_init(&init_param);
+
+    /* [Bug #2 FIXED] Removed first ad9523_setup() call that was here.
+     * It wrote to the chip while still in reset — writes were lost.
+     * Only the post-reset setup call below is needed. */
 
     // Bring AD9523 out of reset
+    DIAG("CLK", "Releasing AD9523 reset (AD9523_RESET_RELEASE)");
     AD9523_RESET_RELEASE();
     HAL_Delay(5);
+    DIAG("CLK", "AD9523 reset released, waited 5 ms");
 
     // Select REFB (100MHz) using REF_SEL pin (true selects REFB here)
+    DIAG("CLK", "Selecting REFB (100 MHz) via REF_SEL pin");
     AD9523_REF_SEL(true);
 
     // Call setup which uses no_os_spi to write registers, io_update, calibrate, sync
+    DIAG("CLK", "Calling ad9523_setup() -- post-reset configuration");
+    uint32_t setup_start = HAL_GetTick();
     ret = ad9523_setup(&dev, &init_param);
+    DIAG("CLK", "ad9523_setup() returned %ld (took %lu ms)",
+         (long)ret, (unsigned long)(HAL_GetTick() - setup_start));
     if (ret != 0) {
         // handle error: lock missing or SPI error
+        DIAG_ERR("CLK", "ad9523_setup() FAILED (ret=%ld) -- lock missing or SPI error", (long)ret);
         return -1;
     }
 
     // Final check
+    DIAG("CLK", "Checking AD9523 status (PLL lock, etc.)");
     ret = ad9523_status(dev);
+    DIAG("CLK", "ad9523_status() returned %ld", (long)ret);
     if (ret != 0) {
         // log/handle
+        DIAG_ERR("CLK", "AD9523 status check FAILED (ret=%ld)", (long)ret);
         return -1;
     }
 
     // optionally manual sync
+    DIAG("CLK", "Triggering manual ad9523_sync()");
     ad9523_sync(dev);
+    DIAG("CLK", "AD9523 configuration complete -- all outputs should be active");
 
     // keep device pointer globally if needed (dev)
     return 0;
@@ -1218,6 +1356,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM1_Init();
+  MX_TIM3_Init();  // B15 fix: init DELADJ PWM timer before LO manager uses it
   MX_I2C1_Init();
   MX_I2C2_Init();
   MX_I2C3_Init();
@@ -1226,23 +1365,44 @@ int main(void)
   MX_UART5_Init();
   MX_USART3_UART_Init();
   MX_USB_DEVICE_Init();
+  MX_IWDG_Init();  /* GAP-3 FIX 2: start hardware watchdog (~4 s timeout) */
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_Base_Start(&htim1);
 
   /* --- Enable DWT cycle counter for accurate microsecond delays --- */
   DWT_Init();
+
+  DIAG_SECTION("SYSTEM INIT");
+  DIAG("SYS", "DWT cycle counter initialized, TIM1 started");
+  DIAG("SYS", "HAL tick at init start: %lu ms", (unsigned long)HAL_GetTick());
+
   //Wait for OCXO 3mn
-  HAL_Delay(180000);
+  DIAG("CLK", "OCXO warmup starting -- waiting 180 s (3 min)");
+  uint32_t ocxo_start = HAL_GetTick();
+  /* [GAP-3 FIX 2] Cannot use HAL_Delay(180000) — IWDG would reset MCU.
+   * Instead loop in 1-second steps, kicking the watchdog each iteration. */
+  for (int ocxo_sec = 0; ocxo_sec < 180; ocxo_sec++) {
+      HAL_IWDG_Refresh(&hiwdg);
+      HAL_Delay(1000);
+  }
+  DIAG_ELAPSED("CLK", "OCXO warmup", ocxo_start);
+
+  DIAG_SECTION("AD9523 POWER SEQUENCING");
+  DIAG("PWR", "Asserting AD9523 reset (pin LOW)");
   HAL_GPIO_WritePin(AD9523_RESET_GPIO_Port,AD9523_RESET_Pin,GPIO_PIN_RESET);
 
   //Power sequencing AD9523
+  DIAG("PWR", "Enabling 1.8V clock rail");
   HAL_GPIO_WritePin(EN_P_1V8_CLOCK_GPIO_Port,EN_P_1V8_CLOCK_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "Enabling 3.3V clock rail");
   HAL_GPIO_WritePin(EN_P_3V3_CLOCK_GPIO_Port,EN_P_3V3_CLOCK_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "Releasing AD9523 reset (pin HIGH)");
   HAL_GPIO_WritePin(AD9523_RESET_GPIO_Port,AD9523_RESET_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "AD9523 power sequencing complete -- all rails up, reset released");
 
   //Set planned Clocks on AD9523
   /*
@@ -1261,24 +1421,38 @@ int main(void)
 
   // Ensure stm32_spi.c and stm32_delay.c are compiled and linked
 
+  DIAG("CLK", "Calling configure_ad9523()...");
+  uint32_t ad9523_cfg_start = HAL_GetTick();
   if (configure_ad9523() != 0) {
       // configuration error - handle as needed
+      DIAG_ERR("CLK", "configure_ad9523() FAILED -- entering infinite halt loop");
       while (1) { HAL_Delay(1000); }
   }
+  DIAG_ELAPSED("CLK", "configure_ad9523()", ad9523_cfg_start);
+  DIAG("CLK", "AD9523 configured successfully");
 
   //Power sequencing FPGA
+  DIAG_SECTION("FPGA POWER SEQUENCING");
+  DIAG("PWR", "Enabling 1.0V FPGA rail");
   HAL_GPIO_WritePin(EN_P_1V0_FPGA_GPIO_Port,EN_P_1V0_FPGA_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "Enabling 1.8V FPGA rail");
   HAL_GPIO_WritePin(EN_P_1V8_FPGA_GPIO_Port,EN_P_1V8_FPGA_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "Enabling 3.3V FPGA rail");
   HAL_GPIO_WritePin(EN_P_3V3_FPGA_GPIO_Port,EN_P_3V3_FPGA_Pin,GPIO_PIN_SET);
   HAL_Delay(100);
+  DIAG("PWR", "FPGA power sequencing complete -- 1.0V -> 1.8V -> 3.3V");
 
 
 // Initialize module IMU
+  DIAG_SECTION("IMU INIT (GY-85)");
+  DIAG("IMU", "Initializing GY-85 IMU...");
   if (!GY85_Init()) {
+      DIAG_ERR("IMU", "GY85_Init() FAILED -- calling Error_Handler()");
       Error_Handler();
   }
+  DIAG("IMU", "GY-85 initialized OK, running 10 calibration samples");
   for(int i=0; i<10;i++){
   if (!GY85_Update(&imu)) {
       Error_Handler();
@@ -1391,40 +1565,61 @@ int main(void)
     ///////////////////////////////////////////////////////////////////////////////////
     ///////////////////////////////////BAROMETER BMP180////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////
+    DIAG_SECTION("BAROMETER INIT (BMP180)");
+    DIAG("IMU", "Reading 5 barometer samples for altitude baseline");
   	for(int i = 0; i<5 ; i++){
 		float BMP_Perssure = myBMP.getPressure();
 		RADAR_Altitude = 44330*(1-(pow((BMP_Perssure/101325),(1/5.255))));
 		HAL_Delay(100);
   	}
+    DIAG("IMU", "Barometer init complete, RADAR_Altitude baseline set");
 
     ///////////////////////////////////////////////////////////////////////////////////
     ///////////////////////////////////////ADF4382/////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////
+    DIAG_SECTION("ADF4382A LO INIT");
     printf("Starting ADF4382A Radar LO System...\n");
     printf("Using SPI4 with TIMED SYNCHRONIZATION (60 MHz clocks)\n");
 
     // Initialize LO manager with TIMED synchronization
+    DIAG("LO", "Calling ADF4382A_Manager_Init(sync=SYNC_METHOD_TIMED)");
+    uint32_t lo_init_start = HAL_GetTick();
     int ret = ADF4382A_Manager_Init(&lo_manager, SYNC_METHOD_TIMED);
-    // Set phase shift (e.g., 500 ps for TX, 500 ps for RX)
-    ADF4382A_SetPhaseShift(&lo_manager, 500, 500);
+    DIAG("LO", "ADF4382A_Manager_Init returned %d (took %lu ms)",
+         ret, (unsigned long)(HAL_GetTick() - lo_init_start));
 
-    // Strobe to apply phase shifts
-    ADF4382A_StrobePhaseShift(&lo_manager, 0); // TX device
-    ADF4382A_StrobePhaseShift(&lo_manager, 1); // RX device
+    /* [Bug #4 FIXED] Check init return code BEFORE calling phase shift.
+     * Previously SetPhaseShift/Strobe were called before this check. */
     if (ret != ADF4382A_MANAGER_OK) {
         printf("LO Manager initialization failed: %d\n", ret);
+        DIAG_ERR("LO", "Manager init FAILED (ret=%d) -- calling Error_Handler()", ret);
         Error_Handler();
     }
 
+    // Set phase shift (e.g., 500 ps for TX, 500 ps for RX)
+    int ps_ret = ADF4382A_SetPhaseShift(&lo_manager, 500, 500);
+    DIAG("LO", "ADF4382A_SetPhaseShift(500, 500) returned %d", ps_ret);
+
+    // Strobe to apply phase shifts
+    int strobe_tx_ret = ADF4382A_StrobePhaseShift(&lo_manager, 0); // TX device
+    int strobe_rx_ret = ADF4382A_StrobePhaseShift(&lo_manager, 1); // RX device
+    DIAG("LO", "StrobePhaseShift TX returned %d, RX returned %d", strobe_tx_ret, strobe_rx_ret);
+
     // Check initial lock status
     bool tx_locked, rx_locked;
+    DIAG("LO", "Checking initial lock status...");
     ret = ADF4382A_CheckLockStatus(&lo_manager, &tx_locked, &rx_locked);
     if (ret == ADF4382A_MANAGER_OK) {
         printf("Initial Lock Status - TX: %s, RX: %s\n",
                tx_locked ? "LOCKED" : "UNLOCKED",
                rx_locked ? "LOCKED" : "UNLOCKED");
+        DIAG("LO", "Initial lock: TX=%s RX=%s", tx_locked ? "LOCKED" : "UNLOCKED", rx_locked ? "LOCKED" : "UNLOCKED");
+    } else {
+        DIAG_ERR("LO", "CheckLockStatus returned %d", ret);
     }
     // Wait for both LOs to lock
+        DIAG("LO", "Entering lock-wait loop (max 10 s = 100 x 100 ms)");
+        uint32_t lock_wait_start = HAL_GetTick();
         uint32_t lock_timeout = 0;
         while (!(tx_locked && rx_locked) && lock_timeout < 100) {
             HAL_Delay(100);
@@ -1435,44 +1630,63 @@ int main(void)
                 printf("Waiting for LO lock... TX: %s, RX: %s\n",
                        tx_locked ? "LOCKED" : "UNLOCKED",
                        rx_locked ? "LOCKED" : "UNLOCKED");
+                DIAG("LO", "Lock poll #%lu: TX=%s RX=%s",
+                     (unsigned long)lock_timeout,
+                     tx_locked ? "LOCKED" : "UNLOCKED",
+                     rx_locked ? "LOCKED" : "UNLOCKED");
             }
         }
+        DIAG_ELAPSED("LO", "Lock wait loop", lock_wait_start);
 
         if (tx_locked && rx_locked) {
             printf("Both LOs locked successfully!\n");
             printf("Synchronization ready - 60 MHz clocks on SYNCP/SYNCN pins\n");
+            DIAG("LO", "Both LOs LOCKED after %lu iterations", (unsigned long)lock_timeout);
             // - 60 MHz phase-aligned clocks on SYNCP/SYNCN pins
             // - SYNC pin connected for triggering
 
             // When ready to synchronize:
+            DIAG("LO", "Calling TriggerTimedSync to pulse sw_sync on both PLLs");
             ADF4382A_TriggerTimedSync(&lo_manager);
             // At this point, the SYNC pin can be toggled to trigger synchronization
         } else {
             printf("LO lock timeout! TX: %s, RX: %s\n",
                    tx_locked ? "LOCKED" : "UNLOCKED",
                    rx_locked ? "LOCKED" : "UNLOCKED");
+            DIAG_ERR("LO", "Lock TIMEOUT after %lu iterations! TX=%s RX=%s",
+                     (unsigned long)lock_timeout,
+                     tx_locked ? "LOCKED" : "UNLOCKED",
+                     rx_locked ? "LOCKED" : "UNLOCKED");
         }
-  // check if there is a lock
+
+  // check if there is a lock via direct GPIO (independent of register read above)
+  DIAG("LO", "Direct GPIO lock detect pins:");
+  DIAG_GPIO("LO", "ADF4382_TX_LKDET", ADF4382_TX_LKDET_GPIO_Port, ADF4382_TX_LKDET_Pin);
+  DIAG_GPIO("LO", "ADF4382_RX_LKDET", ADF4382_RX_LKDET_GPIO_Port, ADF4382_RX_LKDET_Pin);
   if(HAL_GPIO_ReadPin (ADF4382_TX_LKDET_GPIO_Port, ADF4382_TX_LKDET_Pin))
   {
       // Set The LED_1 ON!
       HAL_GPIO_WritePin(LED_1_GPIO_Port, LED_1_Pin, GPIO_PIN_SET);
+      DIAG("LO", "TX lock detected via GPIO -- LED_1 ON");
   }
   else
   {
       // Else .. Turn LED_1 OFF!
       HAL_GPIO_WritePin(LED_1_GPIO_Port, LED_1_Pin, GPIO_PIN_RESET);
+      DIAG_WARN("LO", "TX NOT locked via GPIO -- LED_1 OFF");
   }
 
   if(HAL_GPIO_ReadPin (ADF4382_RX_LKDET_GPIO_Port, ADF4382_RX_LKDET_Pin))
   {
       // Set The LED_2 ON!
       HAL_GPIO_WritePin(LED_2_GPIO_Port, LED_2_Pin, GPIO_PIN_SET);
+      DIAG("LO", "RX lock detected via GPIO -- LED_2 ON");
   }
   else
   {
       // Else .. Turn LED_2 OFF!
       HAL_GPIO_WritePin(LED_2_GPIO_Port, LED_2_Pin, GPIO_PIN_RESET);
+      DIAG_WARN("LO", "RX NOT locked via GPIO -- LED_2 OFF");
   }
 
 
@@ -1481,28 +1695,36 @@ int main(void)
   //////////////////////////////////////////////////////////////////////////////////////
 
   //Power sequencing ADAR1000
+  DIAG_SECTION("ADAR1000 POWER SEQUENCING");
 
   //Tell FPGA to turn off TX RF signal by disabling Mixers
+  DIAG("BF", "Disabling TX mixers (GPIOD pin 11 LOW)");
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_RESET);
 
+  DIAG("PWR", "Enabling 3.3V ADAR12 + ADAR34 rails");
   HAL_GPIO_WritePin(EN_P_3V3_ADAR12_GPIO_Port,EN_P_3V3_ADAR12_Pin,GPIO_PIN_SET);
   HAL_GPIO_WritePin(EN_P_3V3_ADAR34_GPIO_Port,EN_P_3V3_ADAR34_Pin,GPIO_PIN_SET);
   HAL_Delay(500);
+  DIAG("PWR", "Enabling 5.0V ADAR rail");
   HAL_GPIO_WritePin(EN_P_5V0_ADAR_GPIO_Port,EN_P_5V0_ADAR_Pin,GPIO_PIN_SET);
   HAL_Delay(500);
+  DIAG("PWR", "ADAR1000 power sequencing complete");
 
   // System startup message
       uint8_t startup_msg[] = "Starting Phased Array RADAR System...\r\n";
       HAL_UART_Transmit(&huart3, startup_msg, sizeof(startup_msg)-1, 1000);
 
+      DIAG("BF", "Calling systemPowerUpSequence()");
       // Power up sequence
       systemPowerUpSequence();
 
+      DIAG("BF", "Calling initializeBeamMatrices()");
       // Initialize beam matrices
       initializeBeamMatrices();
 
       // Print system status
       printSystemStatus();
+      DIAG("SYS", "System init complete -- entering main loop");
 
   	//////////////////////////////////////////////////////////////////////////////////////
     //////////////////////////////////////////GPS/////////////////////////////////////////
@@ -1564,39 +1786,52 @@ int main(void)
   /************RF Power Amplifier Powering up sequence************/
   /***************************************************************/
   if(PowerAmplifier){
+	  DIAG_SECTION("PA: RF Power Amplifier power-up sequence");
 	  /* Initialize DACs */
 	  /* DAC1: Address 0b1001000 = 0x48 */
+	  DIAG("PA", "Initializing DAC1 (I2C1, addr=0x48, 8-bit)");
 	  if (!DAC5578_Init(&hdac1, &hi2c1, 0x48, 8,
 			  DAC_1_VG_LDAC_GPIO_Port, DAC_1_VG_LDAC_Pin,
 			  DAC_1_VG_CLR_GPIO_Port, DAC_1_VG_CLR_Pin)) {
+		  DIAG_ERR("PA", "DAC1 init FAILED -- calling Error_Handler()");
 		  Error_Handler();
 	  }
+	  DIAG("PA", "DAC1 init OK");
 
 	  /* DAC2: Address 0b1001001 = 0x49 */
+	  DIAG("PA", "Initializing DAC2 (I2C1, addr=0x49, 8-bit)");
 	  if (!DAC5578_Init(&hdac2, &hi2c1, 0x49, 8,
 			  DAC_2_VG_LDAC_GPIO_Port, DAC_2_VG_LDAC_Pin,
 			  DAC_2_VG_CLR_GPIO_Port, DAC_2_VG_CLR_Pin)) {
+		  DIAG_ERR("PA", "DAC2 init FAILED -- calling Error_Handler()");
 		  Error_Handler();
 	  }
+	  DIAG("PA", "DAC2 init OK");
+
 	  /* Configure clear code behavior */
+	  DIAG("PA", "Setting clear code to ZERO on both DACs");
 	  DAC5578_SetClearCode(&hdac1, DAC5578_CLR_CODE_ZERO); // Clear to 0V on CLR pulse
 	  DAC5578_SetClearCode(&hdac2, DAC5578_CLR_CODE_ZERO); // Clear to 0V on CLR pulse
 
 	  /* Configure LDAC so all channels update simultaneously on hardware LDAC */
+	  DIAG("PA", "Setting LDAC mask=0xFF on both DACs (all channels respond)");
 	  DAC5578_SetupLDAC(&hdac1, 0xFF); // All channels respond to LDAC
 	  DAC5578_SetupLDAC(&hdac2, 0xFF); // All channels respond to LDAC
 
 	  //set Vg [1-8] to -3.98V -> input opamp = 1.63058V->126(8bits)
+	  DIAG("PA", "Writing initial DAC_val=%d to DAC1 channels 0-7", DAC_val);
 	  for(int channel = 0; channel < 8; channel++){
 		  DAC5578_WriteAndUpdateChannelValue(&hdac1, channel, DAC_val);
 	  }
 
 	  //set Vg [9-16] to -3.98V -> input opamp = 1.63058V->126(8bits)
+	  DIAG("PA", "Writing initial DAC_val=%d to DAC2 channels 0-7", DAC_val);
 	  for(int channel = 0; channel < 8; channel++){
 		  DAC5578_WriteAndUpdateChannelValue(&hdac2, channel, DAC_val);
 	  }
 
 	  /* Optional: Use hardware LDAC for simultaneous update of all channels */
+	  DIAG("PA", "Pulsing LDAC on both DACs for simultaneous update");
 	  HAL_GPIO_WritePin(DAC_1_VG_LDAC_GPIO_Port, DAC_1_VG_LDAC_Pin, GPIO_PIN_RESET);
 	  HAL_GPIO_WritePin(DAC_2_VG_LDAC_GPIO_Port, DAC_2_VG_LDAC_Pin, GPIO_PIN_RESET);
 	  HAL_Delay(1);
@@ -1604,85 +1839,114 @@ int main(void)
 	  HAL_GPIO_WritePin(DAC_2_VG_LDAC_GPIO_Port, DAC_2_VG_LDAC_Pin, GPIO_PIN_SET);
 
 	  //Enable RF Power Amplifier VDD = 22V
+	  DIAG("PA", "Enabling RFPA VDD=22V (EN_DIS_RFPA_VDD HIGH)");
 	  HAL_GPIO_WritePin(EN_DIS_RFPA_VDD_GPIO_Port, EN_DIS_RFPA_VDD_Pin, GPIO_PIN_SET);
 
 	  /* Initialize ADCs with correct addresses */
 	  /* ADC1: Address 0x48, Single-Ended mode, Internal Ref ON + ADC ON */
+	  DIAG("PA", "Initializing ADC1 (I2C2, addr=0x48, single-ended, ref+adc ON)");
 	  if (!ADS7830_Init(&hadc1, &hi2c2, 0x48,
 						ADS7830_SDMODE_SINGLE, ADS7830_PDIRON_ADON)) {
+		  DIAG_ERR("PA", "ADC1 init FAILED -- calling Error_Handler()");
 		  Error_Handler();
 	  }
+	  DIAG("PA", "ADC1 init OK");
 
 	  /* ADC2: Address 0x4A, Single-Ended mode, Internal Ref ON + ADC ON */
+	  DIAG("PA", "Initializing ADC2 (I2C2, addr=0x4A, single-ended, ref+adc ON)");
 	  if (!ADS7830_Init(&hadc2, &hi2c2, 0x4A,
 						ADS7830_SDMODE_SINGLE, ADS7830_PDIRON_ADON)) {
+		  DIAG_ERR("PA", "ADC2 init FAILED -- calling Error_Handler()");
 		  Error_Handler();
 	  }
+	  DIAG("PA", "ADC2 init OK");
 
 	  /* Read all 8 channels from ADC1 and calculate Idq */
+	  DIAG("PA", "Reading initial Idq from ADC1 channels 0-7");
 	  for (uint8_t channel = 0; channel < 8; channel++) {
 		  adc1_readings[channel] = ADS7830_Measure_SingleEnded(&hadc1, channel);
 		  Idq_reading[channel]= (3.3/255)*adc1_readings[channel]/(50*0.005);//Idq=Vadc/(GxRshunt)//G_INA241A3=50;Rshunt=5mOhms
+		  DIAG("PA", "  ADC1 ch%d: raw=%d Idq=%.3fA", channel, adc1_readings[channel], Idq_reading[channel]);
 	  }
 
 	  /* Read all 8 channels from ADC2 and calculate Idq*/
+	  DIAG("PA", "Reading initial Idq from ADC2 channels 0-7");
 	  for (uint8_t channel = 0; channel < 8; channel++) {
 		  adc2_readings[channel] = ADS7830_Measure_SingleEnded(&hadc2, channel);
 		  Idq_reading[channel+8]= (3.3/255)*adc2_readings[channel]/(50*0.005);//Idq=Vadc/(GxRshunt)//G_INA241A3=50;Rshunt=5mOhms
+		  DIAG("PA", "  ADC2 ch%d: raw=%d Idq=%.3fA", channel, adc2_readings[channel], Idq_reading[channel+8]);
 	  }
 
+	  DIAG("PA", "Starting Idq calibration loop for DAC1 channels 0-7 (target=1.680A)");
 	  for (uint8_t channel = 0; channel < 8; channel++){
 	      uint8_t safety_counter = 0;
 	      DAC_val = 126; // Reset for each channel
 
 	      do {
 	          if (safety_counter++ > 50) { // Prevent infinite loop
+	              DIAG_WARN("PA", "  DAC1 ch%d: safety limit reached (50 iterations), DAC_val=%d Idq=%.3fA",
+	                        channel, DAC_val, Idq_reading[channel]);
 	              break;
 	          }
 	          DAC_val = DAC_val - 4;
 	          DAC5578_WriteAndUpdateChannelValue(&hdac1, channel, DAC_val);
 	          adc1_readings[channel] = ADS7830_Measure_SingleEnded(&hadc1, channel);
 	          Idq_reading[channel] = (3.3/255) * adc1_readings[channel] / (50 * 0.005);
-	      } while (DAC_val > 38 && abs(Idq_reading[channel] - 1.680) < 0.2); // Fixed logic
+	      } while (DAC_val > 38 && abs(Idq_reading[channel] - 1.680) > 0.2); // B12 fix: loop while FAR from target
+	      DIAG("PA", "  DAC1 ch%d calibrated: DAC_val=%d Idq=%.3fA iters=%d",
+	           channel, DAC_val, Idq_reading[channel], safety_counter);
 	  }
 
+	  DIAG("PA", "Starting Idq calibration loop for DAC2 channels 0-7 (target=1.680A)");
 	  for (uint8_t channel = 0; channel < 8; channel++){
 	      uint8_t safety_counter = 0;
 	      DAC_val = 126; // Reset for each channel
 
 	      do {
 	          if (safety_counter++ > 50) { // Prevent infinite loop
+	              DIAG_WARN("PA", "  DAC2 ch%d: safety limit reached (50 iterations), DAC_val=%d Idq=%.3fA",
+	                        channel, DAC_val, Idq_reading[channel+8]);
 	              break;
 	          }
 	          DAC_val = DAC_val - 4;
 	          DAC5578_WriteAndUpdateChannelValue(&hdac2, channel, DAC_val);
-	          adc1_readings[channel] = ADS7830_Measure_SingleEnded(&hadc2, channel);
+	          adc2_readings[channel] = ADS7830_Measure_SingleEnded(&hadc2, channel); // B13 fix: was adc1_readings
 	          Idq_reading[channel+8] = (3.3/255) * adc2_readings[channel] / (50 * 0.005);
-	      } while (DAC_val > 38 && abs(Idq_reading[channel+8] - 1.680) < 0.2); // Fixed logic
+	      } while (DAC_val > 38 && abs(Idq_reading[channel+8] - 1.680) > 0.2); // B12 fix: loop while FAR from target
+	      DIAG("PA", "  DAC2 ch%d calibrated: DAC_val=%d Idq=%.3fA iters=%d",
+	           channel, DAC_val, Idq_reading[channel+8], safety_counter);
 	  }
+	  DIAG("PA", "PA IDQ calibration sequence COMPLETE");
   }
 
   //RESET FPGA
+  DIAG("FPGA", "Resetting FPGA (GPIOD pin 12: LOW -> 10ms -> HIGH)");
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
   HAL_Delay(10);
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+  DIAG("FPGA", "FPGA reset complete");
 
 
 
   //Tell FPGA to apply TX RF by enabling Mixers
+  DIAG("FPGA", "Enabling TX mixers (GPIOD pin 11 HIGH)");
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_SET);
 
   /* T°C sensor TMP37 ADC3: Address 0x49, Single-Ended mode, Internal Ref ON + ADC ON */
+  DIAG("SYS", "Initializing temperature sensor ADC3 (I2C2, addr=0x49, TMP37)");
   if (!ADS7830_Init(&hadc3, &hi2c2, 0x49,
 					ADS7830_SDMODE_SINGLE, ADS7830_PDIRON_ADON)) {
+	  DIAG_ERR("SYS", "Temperature sensor ADC3 init FAILED -- calling Error_Handler()");
 	  Error_Handler();
   }
+  DIAG("SYS", "Temperature sensor ADC3 init OK");
 
   /***************************************************************/
   /************************ERRORS HANDLERS************************/
   /***************************************************************/
 
   // Initialize error handler system
+  DIAG("SYS", "Initializing error handler: clearing error_count, last_error, emergency_state");
   error_count = 0;
   last_error = ERROR_NONE;
   system_emergency_state = false;
@@ -1692,10 +1956,14 @@ int main(void)
   /***************************************************************/
 
   // Send initial status to GUI
+  DIAG("USB", "Sending initial system status to GUI via USB CDC");
   char initial_status[500];
   getSystemStatusForGUI(initial_status, sizeof(initial_status));
   // Send via USB to GUI
   CDC_Transmit_FS((uint8_t*)initial_status, strlen(initial_status));
+  DIAG("USB", "Initial status sent (%d bytes)", (int)strlen(initial_status));
+
+  DIAG("SYS", "=== INIT COMPLETE -- entering main loop ===");
 
 
 
@@ -1717,11 +1985,15 @@ int main(void)
 	    if (!checkSystemHealthStatus()) {
 	        // System is in bad state, enter safe mode
 	    	//Tell FPGA to turn off TX RF signal by disabling Mixers
+	    	DIAG_ERR("SYS", "checkSystemHealthStatus() FAILED -- entering SAFE MODE");
+	    	DIAG("SYS", "Disabling TX mixers (GPIOD pin 11 LOW)");
 	    	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, GPIO_PIN_RESET);
+	    	DIAG("SYS", "Calling systemPowerDownSequence()");
 	        systemPowerDownSequence();
 
 	        char emergency_msg[] = "SYSTEM IN SAFE MODE - Manual intervention required\r\n";
 	        HAL_UART_Transmit(&huart3, (uint8_t*)emergency_msg, strlen(emergency_msg), 1000);
+	        DIAG_ERR("SYS", "SAFE MODE ACTIVE -- blinking all LEDs, waiting for system_emergency_state clear");
 
 	        // Blink all LEDs to indicate safe mode
 	        while (system_emergency_state) {
@@ -1730,6 +2002,7 @@ int main(void)
 	            HAL_GPIO_TogglePin(LED_3_GPIO_Port, LED_3_Pin);
 	            HAL_GPIO_TogglePin(LED_4_GPIO_Port, LED_4_Pin);
 	        }
+	        DIAG("SYS", "Exited safe mode blink loop -- system_emergency_state cleared");
 	    }
 	  //////////////////////////////////////////////////////////////////////////////////////
 	  ////////////////////////// Monitor ADF4382A lock status periodically//////////////////
@@ -1744,6 +2017,13 @@ int main(void)
               printf("LO Lock Lost! TX: %s, RX: %s\n",
                      tx_locked ? "LOCKED" : "UNLOCKED",
                      rx_locked ? "LOCKED" : "UNLOCKED");
+              DIAG_ERR("LO", "Lock LOST in main loop! TX=%s RX=%s",
+                       tx_locked ? "LOCKED" : "UNLOCKED",
+                       rx_locked ? "LOCKED" : "UNLOCKED");
+              DIAG_GPIO("LO", "TX_LKDET (direct)", ADF4382_TX_LKDET_GPIO_Port, ADF4382_TX_LKDET_Pin);
+              DIAG_GPIO("LO", "RX_LKDET (direct)", ADF4382_RX_LKDET_GPIO_Port, ADF4382_RX_LKDET_Pin);
+          } else {
+              DIAG("LO", "Lock poll OK: TX=LOCKED RX=LOCKED");
           }
 
           last_check = HAL_GetTick();
@@ -1765,19 +2045,65 @@ int main(void)
 		  Temperature_7 = ADS7830_Measure_SingleEnded(&hadc3, 6)*0.64705f;
 		  Temperature_8 = ADS7830_Measure_SingleEnded(&hadc3, 7)*0.64705f;
 
+		  DIAG("PA", "Temps: T1=%.1f T2=%.1f T3=%.1f T4=%.1f T5=%.1f T6=%.1f T7=%.1f T8=%.1f",
+		       (double)Temperature_1, (double)Temperature_2, (double)Temperature_3, (double)Temperature_4,
+		       (double)Temperature_5, (double)Temperature_6, (double)Temperature_7, (double)Temperature_8);
+
+		  /* [GAP-3 FIX 3] Populate `temperature` with hottest sensor reading.
+		   * checkSystemHealth() uses `temperature` for the >75 °C overtemp check;
+		   * previously it was uninitialized. */
+		  {
+		      float temps[8] = { Temperature_1, Temperature_2, Temperature_3, Temperature_4,
+		                         Temperature_5, Temperature_6, Temperature_7, Temperature_8 };
+		      temperature = temps[0];
+		      for (int ti = 1; ti < 8; ti++) {
+		          if (temps[ti] > temperature) temperature = temps[ti];
+		      }
+		      DIAG("PA", "System temperature (max of 8 sensors) = %.1f C", (double)temperature);
+		  }
+
 		  //(20 mV/°C on TMP37) QPA2962 RF amplifier Operating Temp. Range, TBASE min−40 normal+25 max+85 °C
 		  int Max_Temp = 25;
 		  if((Temperature_1>Max_Temp)||(Temperature_2>Max_Temp)||(Temperature_3>Max_Temp)||(Temperature_4>Max_Temp)
 				  ||(Temperature_5>Max_Temp)||(Temperature_6>Max_Temp)||(Temperature_7>Max_Temp)||(Temperature_8>Max_Temp))
 			{
 			  HAL_GPIO_WritePin(EN_DIS_COOLING_GPIO_Port, EN_DIS_COOLING_Pin, GPIO_PIN_SET);
+			  DIAG_WARN("PA", "Over-temp detected (>%d C) -- cooling ENABLED", Max_Temp);
 			}
 		  else{
 			  HAL_GPIO_WritePin(EN_DIS_COOLING_GPIO_Port, EN_DIS_COOLING_Pin, GPIO_PIN_RESET);
 		  }
 
+		  /* [GAP-3 FIX 4] Periodic IDQ re-read — the Idq_reading[] array was only
+		   * populated during startup/calibration.  checkSystemHealth() compares
+		   * stale values for overcurrent (>2.5 A) and bias fault (<0.1 A) checks.
+		   * Re-read all 16 channels every 5 s alongside temperature. */
+		  if (PowerAmplifier) {
+		      DIAG("PA", "Periodic IDQ re-read (ADC1 + ADC2, 16 channels)");
+		      for (uint8_t ch = 0; ch < 8; ch++) {
+		          adc1_readings[ch] = ADS7830_Measure_SingleEnded(&hadc1, ch);
+		          Idq_reading[ch] = (3.3f/255.0f) * adc1_readings[ch] / (50.0f * 0.005f);
+		      }
+		      for (uint8_t ch = 0; ch < 8; ch++) {
+		          adc2_readings[ch] = ADS7830_Measure_SingleEnded(&hadc2, ch);
+		          Idq_reading[ch + 8] = (3.3f/255.0f) * adc2_readings[ch] / (50.0f * 0.005f);
+		      }
+		      DIAG("PA", "IDQ[0..3]=%.3f %.3f %.3f %.3f  [4..7]=%.3f %.3f %.3f %.3f",
+		           (double)Idq_reading[0], (double)Idq_reading[1],
+		           (double)Idq_reading[2], (double)Idq_reading[3],
+		           (double)Idq_reading[4], (double)Idq_reading[5],
+		           (double)Idq_reading[6], (double)Idq_reading[7]);
+		      DIAG("PA", "IDQ[8..11]=%.3f %.3f %.3f %.3f  [12..15]=%.3f %.3f %.3f %.3f",
+		           (double)Idq_reading[8], (double)Idq_reading[9],
+		           (double)Idq_reading[10], (double)Idq_reading[11],
+		           (double)Idq_reading[12], (double)Idq_reading[13],
+		           (double)Idq_reading[14], (double)Idq_reading[15]);
+		  }
 
-		  last_check = HAL_GetTick();
+
+		  /* [BUG #6 FIXED] Was 'last_check' — now correctly writes 'last_check1'
+		   * so the temperature timer runs independently of the lock-check timer. */
+		  last_check1 = HAL_GetTick();
 		  }
 	  //////////////////////////////////////////////////////////////////////////////////////
 	  /////////////////////////////////////ADAR1000/////////////////////////////////////////
@@ -1787,6 +2113,10 @@ int main(void)
 	 //steering angle (rad)= arcsin(phase_dif/Pi)
 
       runRadarPulseSequence();
+
+      /* [GAP-3 FIX 2] Kick hardware watchdog — if we don't reach here within
+       * ~4 s, the IWDG resets the MCU automatically. */
+      HAL_IWDG_Refresh(&hiwdg);
 
       // Optional: Add system monitoring here
       // Check temperatures, power levels, etc.
@@ -2142,6 +2472,63 @@ static void MX_TIM1_Init(void)
 }
 
 /**
+  * @brief TIM3 Initialization Function — DELADJ PWM for ADF4382A phase shift
+  *        CH2 = TX DELADJ, CH3 = RX DELADJ
+  *        Period (ARR) = 999 → 1000 counts matching DELADJ_MAX_DUTY_CYCLE
+  *        Prescaler = 71 → 1 MHz tick @ 72 MHz APB1 → 1 kHz PWM frequency
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+  /* B15 fix: provide htim3 definition so adf4382a_manager.c extern resolves */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 71;                          // 72 MHz / (71+1) = 1 MHz tick
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 999;                             // ARR = 999 → 1000 counts = DELADJ_MAX_DUTY_CYCLE
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;                                // Start with 0% duty cycle
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  // Configure CH2 (TX DELADJ)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  // Configure CH3 (RX DELADJ)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
   * @brief UART5 Initialization Function
   * @param None
   * @retval None
@@ -2350,6 +2737,30 @@ static void MX_GPIO_Init(void)
 /* ============================================================
  *                  DEVICE INITIALIZATION
  * ============================================================ */
+
+/**
+ * [GAP-3 FIX 2] Initialize Independent Watchdog (IWDG).
+ *
+ * LSI clock ≈ 32 kHz.
+ * Prescaler = 256  → IWDG counter clock ≈ 125 Hz (8 ms/tick).
+ * Reload   = 500   → timeout ≈ 500 × 8 ms = 4.0 s.
+ *
+ * The main loop must call HAL_IWDG_Refresh() within this window
+ * or the MCU hard-resets — protecting against firmware hangs when
+ * PA rails may be energized.
+ */
+static void MX_IWDG_Init(void)
+{
+    hiwdg.Instance       = IWDG;
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+    hiwdg.Init.Reload    = 500;
+    hiwdg.Init.Window    = IWDG_WINDOW_DISABLE;
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+        DIAG_ERR("SYS", "IWDG init FAILED -- continuing without hardware watchdog");
+    } else {
+        DIAG("SYS", "IWDG hardware watchdog started (timeout ~4s)");
+    }
+}
 
 
 

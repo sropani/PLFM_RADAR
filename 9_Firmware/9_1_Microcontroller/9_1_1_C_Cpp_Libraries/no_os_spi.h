@@ -130,8 +130,8 @@ struct no_os_spi_init_param {
 	uint32_t	device_id;
 	/** maximum transfer speed */
 	uint32_t	max_speed_hz;
-	/** SPI chip select */
-	uint8_t		chip_select;
+	/** SPI chip select (widened to uint16_t for STM32 GPIO_PIN_xx masks) */
+	uint16_t	chip_select;
 	/** SPI mode */
 	enum no_os_spi_mode	mode;
 	/** SPI bit order */
@@ -184,8 +184,8 @@ struct no_os_spi_desc {
 	uint32_t	device_id;
 	/** maximum transfer speed */
 	uint32_t	max_speed_hz;
-	/** SPI chip select */
-	uint8_t		chip_select;
+	/** SPI chip select (widened to uint16_t for STM32 GPIO_PIN_xx masks) */
+	uint16_t	chip_select;
 	/** SPI mode */
 	enum no_os_spi_mode	mode;
 	/** SPI bit order */

@@ -103,13 +103,17 @@ reg [7:0] signal_power_i, signal_power_q;
 
 // Internal mixing signals
 // DSP48E1 with AREG=1, BREG=1, MREG=1, PREG=1 handles all internal pipelining
-// Latency: 3 cycles (1 for AREG/BREG, 1 for MREG, 1 for PREG)
+// Latency: 4 cycles (1 for AREG/BREG, 1 for MREG, 1 for PREG, 1 for post-DSP retiming)
 wire signed [MIXER_WIDTH-1:0] adc_signed_w;
 reg signed [MIXER_WIDTH + NCO_WIDTH -1:0] mixed_i, mixed_q;
 reg mixed_valid;
 reg mixer_overflow_i, mixer_overflow_q;
-// Pipeline valid tracking: 3-stage shift register to match DSP48E1 AREG+MREG+PREG latency
-reg [2:0] dsp_valid_pipe;
+// Pipeline valid tracking: 4-stage shift register (3 for DSP48E1 + 1 for post-DSP retiming)
+reg [3:0] dsp_valid_pipe;
+// Post-DSP retiming registers — breaks DSP48E1 CLK→P to fabric timing path
+// This extra pipeline stage absorbs the 1.866ns DSP output prop delay + routing,
+// ensuring WNS > 0 at 400 MHz regardless of placement seed
+(* DONT_TOUCH = "TRUE" *) reg signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_i_retimed, mult_q_retimed;
 
 // Output stage registers
 reg signed [17:0] baseband_i_reg, baseband_q_reg;
@@ -219,12 +223,12 @@ nco_400m_enhanced nco_core (
 assign adc_signed_w = {1'b0, adc_data, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} - 
                       {1'b0, {ADC_WIDTH{1'b1}}, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} / 2;
 
-// Valid pipeline: 3-stage shift register matching DSP48E1 AREG+MREG+PREG latency
+// Valid pipeline: 4-stage shift register (3 for DSP48E1 AREG+MREG+PREG + 1 for retiming)
 always @(posedge clk_400m or negedge reset_n_400m) begin
     if (!reset_n_400m) begin
-        dsp_valid_pipe <= 3'b000;
+        dsp_valid_pipe <= 4'b0000;
     end else begin
-        dsp_valid_pipe <= {dsp_valid_pipe[1:0], (nco_ready && adc_data_valid_i && adc_data_valid_q)};
+        dsp_valid_pipe <= {dsp_valid_pipe[2:0], (nco_ready && adc_data_valid_i && adc_data_valid_q)};
     end
 end
 
@@ -268,6 +272,17 @@ always @(posedge clk_400m or negedge reset_n_400m) begin
     end else begin
         mult_i_reg <= mult_i_internal;
         mult_q_reg <= mult_q_internal;
+    end
+end
+
+// Stage 4: Post-DSP retiming register (matches synthesis path)
+always @(posedge clk_400m or negedge reset_n_400m) begin
+    if (!reset_n_400m) begin
+        mult_i_retimed <= 0;
+        mult_q_retimed <= 0;
+    end else begin
+        mult_i_retimed <= mult_i_reg;
+        mult_q_retimed <= mult_q_reg;
     end
 end
 
@@ -448,6 +463,19 @@ DSP48E1 #(
 wire signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_i_reg = dsp_p_i[MIXER_WIDTH+NCO_WIDTH-1:0];
 wire signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_q_reg = dsp_p_q[MIXER_WIDTH+NCO_WIDTH-1:0];
 
+// Stage 4: Post-DSP retiming register — breaks DSP48E1 CLK→P to fabric path
+// Without this, the DSP output prop delay (1.866ns) + routing (0.515ns) exceeds
+// the 2.500ns clock period at slow process corner
+always @(posedge clk_400m or negedge reset_n_400m) begin
+    if (!reset_n_400m) begin
+        mult_i_retimed <= 0;
+        mult_q_retimed <= 0;
+    end else begin
+        mult_i_retimed <= mult_i_reg;
+        mult_q_retimed <= mult_q_reg;
+    end
+end
+
 `endif
 
 // ============================================================================
@@ -464,7 +492,7 @@ always @(posedge clk_400m or negedge reset_n_400m) begin
         mixer_overflow_q <= 0;
         saturation_count <= 0;
         overflow_detected <= 0;
-    end else if (dsp_valid_pipe[2]) begin
+    end else if (dsp_valid_pipe[3]) begin
         // Force saturation for testing (applied after DSP output, not on input path)
         if (force_saturation_sync) begin
             mixed_i <= 34'h1FFFFFFFF;
@@ -472,15 +500,15 @@ always @(posedge clk_400m or negedge reset_n_400m) begin
             mixer_overflow_i <= 1'b1;
             mixer_overflow_q <= 1'b1;
         end else begin
-            // Normal path: take DSP48E1 multiply result
-            mixed_i <= mult_i_reg;
-            mixed_q <= mult_q_reg;
+            // Normal path: take retimed DSP48E1 multiply result
+            mixed_i <= mult_i_retimed;
+            mixed_q <= mult_q_retimed;
             
-            // Overflow detection on current cycle's multiply result
-            mixer_overflow_i <= (mult_i_reg > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
-                               (mult_i_reg < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
-            mixer_overflow_q <= (mult_q_reg > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
-                               (mult_q_reg < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
+            // Overflow detection on retimed multiply result
+            mixer_overflow_i <= (mult_i_retimed > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
+                               (mult_i_retimed < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
+            mixer_overflow_q <= (mult_q_retimed > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
+                               (mult_q_retimed < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
         end
         
         mixed_valid <= 1;

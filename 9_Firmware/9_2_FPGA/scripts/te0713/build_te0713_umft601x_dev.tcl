@@ -1,24 +1,17 @@
-# build_te0712_dev.tcl
+# build_te0713_umft601x_dev.tcl
 #
-# Vivado batch build for Trenz TE0712/TE0701 split target.
-#
-# Usage:
-#   vivado -mode batch -source scripts/build_te0712_dev.tcl
-#
-# Notes:
-# - This target uses radar_system_top_te0712_dev.v (minimal bring-up top).
-# - constraints/te0712_te0701_minimal.xdc currently has verified clock/reset
-#   pins and placeholder LED/status pins.
+# Vivado batch build for Trenz TE0713/TE0701 with UMFT601X-B over FMC LPC.
 
 set script_dir [file dirname [file normalize [info script]]]
-set project_root [file normalize [file join $script_dir ".."]]
+set project_root [file normalize [file join $script_dir "../.."]]
 
-set project_name "aeris10_te0712_dev"
-set build_dir [file join $project_root "vivado_te0712_dev"]
+set project_name "aeris10_te0713_umft601x_dev"
+set build_dir [file join $project_root "vivado_te0713_umft601x_dev"]
 set reports_dir [file join $build_dir "reports"]
 
-set top_file [file join $project_root "radar_system_top_te0712_dev.v"]
-set xdc_file [file join $project_root "constraints" "te0712_te0701_minimal.xdc"]
+set top_file [file join $project_root "radar_system_top_te0713_umft601x_dev.v"]
+set usb_file [file join $project_root "usb_data_interface.v"]
+set xdc_file [file join $project_root "constraints" "te0713_te0701_umft601x.xdc"]
 
 file mkdir $build_dir
 file mkdir $reports_dir
@@ -27,12 +20,16 @@ create_project -force $project_name $build_dir -part xc7a200tfbg484-2
 set_property target_language Verilog [current_project]
 
 add_files -norecurse $top_file
+add_files -norecurse $usb_file
 add_files -fileset constrs_1 -norecurse $xdc_file
 
-set_property top radar_system_top_te0712_dev [current_fileset]
+set_property top radar_system_top_te0713_umft601x_dev [current_fileset]
 update_compile_order -fileset sources_1
 
-puts "INFO: Launching implementation to bitstream..."
+# Use Performance_ExplorePostRoutePhysOpt strategy for timing closure
+set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+
+puts "INFO: Launching implementation to bitstream (Performance_ExplorePostRoutePhysOpt)..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 

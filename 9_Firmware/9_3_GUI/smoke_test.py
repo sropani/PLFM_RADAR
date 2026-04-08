@@ -8,7 +8,7 @@ optionally captures raw ADC samples for offline analysis.
 
 Usage:
   python smoke_test.py              # Mock mode (no hardware)
-  python smoke_test.py --live       # Real FT601 hardware
+  python smoke_test.py --live       # Real FT2232H hardware
   python smoke_test.py --live --adc-dump adc_raw.npy  # Capture ADC data
 
 Self-Test Subsystems:
@@ -35,7 +35,7 @@ import numpy as np
 
 # Add parent directory for radar_protocol import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from radar_protocol import RadarProtocol, FT601Connection
+from radar_protocol import RadarProtocol, FT2232HConnection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +67,7 @@ TEST_NAMES = {
 class SmokeTest:
     """Host-side smoke test controller."""
 
-    def __init__(self, connection: FT601Connection, adc_dump_path: str = None):
+    def __init__(self, connection: FT2232HConnection, adc_dump_path: str = None):
         self.conn = connection
         self.adc_dump_path = adc_dump_path
         self._adc_samples = []
@@ -85,7 +85,7 @@ class SmokeTest:
         # Step 1: Connect
         if not self.conn.is_open:
             if not self.conn.open():
-                log.error("Failed to open FT601 connection")
+                log.error("Failed to open FT2232H connection")
                 return False
 
         # Step 2: Send self-test trigger (opcode 0x30)
@@ -205,15 +205,15 @@ class SmokeTest:
 def main():
     parser = argparse.ArgumentParser(description="AERIS-10 Board Smoke Test")
     parser.add_argument("--live", action="store_true",
-                        help="Use real FT601 hardware (default: mock)")
+                        help="Use real FT2232H hardware (default: mock)")
     parser.add_argument("--device", type=int, default=0,
-                        help="FT601 device index")
+                        help="FT2232H device index")
     parser.add_argument("--adc-dump", type=str, default=None,
                         help="Save raw ADC samples to .npy file")
     args = parser.parse_args()
 
     mock_mode = not args.live
-    conn = FT601Connection(mock=mock_mode)
+    conn = FT2232HConnection(mock=mock_mode)
 
     tester = SmokeTest(conn, adc_dump_path=args.adc_dump)
     success = tester.run()

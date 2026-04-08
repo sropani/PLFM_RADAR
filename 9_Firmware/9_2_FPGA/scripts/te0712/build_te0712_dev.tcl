@@ -1,19 +1,24 @@
-# build_te0713_dev.tcl
+# build_te0712_dev.tcl
 #
-# Vivado batch build for Trenz TE0713/TE0701 split target.
+# Vivado batch build for Trenz TE0712/TE0701 split target.
 #
 # Usage:
-#   vivado -mode batch -source scripts/build_te0713_dev.tcl
+#   vivado -mode batch -source scripts/build_te0712_dev.tcl
+#
+# Notes:
+# - This target uses radar_system_top_te0712_dev.v (minimal bring-up top).
+# - constraints/te0712_te0701_minimal.xdc currently has verified clock/reset
+#   pins and placeholder LED/status pins.
 
 set script_dir [file dirname [file normalize [info script]]]
-set project_root [file normalize [file join $script_dir ".."]]
+set project_root [file normalize [file join $script_dir "../.."]]
 
-set project_name "aeris10_te0713_dev"
-set build_dir [file join $project_root "vivado_te0713_dev"]
+set project_name "aeris10_te0712_dev"
+set build_dir [file join $project_root "vivado_te0712_dev"]
 set reports_dir [file join $build_dir "reports"]
 
-set top_file [file join $project_root "radar_system_top_te0713_dev.v"]
-set xdc_file [file join $project_root "constraints" "te0713_te0701_minimal.xdc"]
+set top_file [file join $project_root "radar_system_top_te0712_dev.v"]
+set xdc_file [file join $project_root "constraints" "te0712_te0701_minimal.xdc"]
 
 file mkdir $build_dir
 file mkdir $reports_dir
@@ -24,7 +29,7 @@ set_property target_language Verilog [current_project]
 add_files -norecurse $top_file
 add_files -fileset constrs_1 -norecurse $xdc_file
 
-set_property top radar_system_top_te0713_dev [current_fileset]
+set_property top radar_system_top_te0712_dev [current_fileset]
 update_compile_order -fileset sources_1
 
 puts "INFO: Launching implementation to bitstream..."

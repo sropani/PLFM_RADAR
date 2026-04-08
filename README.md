@@ -49,7 +49,7 @@ The AERIS-10 main sub-systems are:
   - **2x Microwave Mixers (LT5552)** - For up-conversion and IF-down-conversion
   - **4x 4-Channel Phase Shifters (ADAR1000)** - For RX and TX chain beamforming
   - **16x Front End Chips (ADTR1107)** - Used for both Low Noise Amplifying (RX) and Power Amplifying (TX) stages
-  - **XC7A100T FPGA** - Handles RADAR Signal Processing:
+  - **XC7A50T FPGA** - Handles RADAR Signal Processing on the upstream FTG256 board:
     - PLFM Chirps generation via the DAC
     - Raw ADC data read
     - Automatic Gain Control (AGC)
@@ -150,11 +150,11 @@ To keep the repository root clean and make artifacts easy to find, place generat
 
 ### Hardware Assembly
 
-1. **Order PCBs**: All Gerber files are available in `/4_Schematics and Boards Layout`
-2. **Source Components**: Bill of materials (BOM) in `/4_Schematics and Boards Layout/4_7_Production Files`
-3. **Assembly**: Follow the assembly guide in `/10_docs/assembly_guide.md`
-4. **Antenna**: Choose appropriate array for your version
-5. **Enclosure**: 3D printable files in `/10_docs/Hardware/Enclosure`
+1. **Order PCBs**: Production outputs are under `/4_Schematics and Boards Layout/4_7_Production Files`
+2. **Source Components**: BOM/CPL files are co-located under `/4_Schematics and Boards Layout/4_7_Production Files`
+3. **Assembly**: Use the schematics in `/4_Schematics and Boards Layout/4_6_Schematics` together with the production outputs above; a standalone assembly guide is not currently tracked
+4. **Antenna**: Choose appropriate array files for your target variant
+5. **Enclosure**: Mechanical drawings currently live in `/8_Utils/Mechanical_Drawings`
 
 ## 📜 License
 
@@ -207,7 +207,7 @@ Comprehensive documentation is available in the `/docs` folder and served via Gi
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](/CONTRIBUTING.md) for details.
+We welcome contributions! Please see our [Contributing Guidelines](/CONTRIBUTING.md) for details on repo layout, branch workflow, and basic PR checks.
 
 Areas where help is especially appreciated:
 - **RF Engineers**: Review designs, optimize antenna performance

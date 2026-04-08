@@ -57,13 +57,16 @@ wire signed [DATA_WIDTH+COEFF_WIDTH-1:0] mult_result [0:TAPS-1];
 // Level 0: 16 pairwise sums of 32 products
 reg signed [ACCUM_WIDTH-1:0] add_l0 [0:15];
 // Level 1: 8 pairwise sums
-reg signed [ACCUM_WIDTH-1:0] add_l1 [0:7];
+// USE_DSP="no" forces pure additions to fabric CARRY4 chains, freeing DSP48E1
+// slices for the FFT butterfly multipliers that otherwise spill to 18-level
+// fabric carry chains causing timing violations on the XC7A50T (120 DSP budget).
+(* USE_DSP = "no" *) reg signed [ACCUM_WIDTH-1:0] add_l1 [0:7];
 // Level 2: 4 pairwise sums
-reg signed [ACCUM_WIDTH-1:0] add_l2 [0:3];
+(* USE_DSP = "no" *) reg signed [ACCUM_WIDTH-1:0] add_l2 [0:3];
 // Level 3: 2 pairwise sums
-reg signed [ACCUM_WIDTH-1:0] add_l3 [0:1];
+(* USE_DSP = "no" *) reg signed [ACCUM_WIDTH-1:0] add_l3 [0:1];
 // Level 4: final sum
-reg signed [ACCUM_WIDTH-1:0] accumulator_reg;
+(* USE_DSP = "no" *) reg signed [ACCUM_WIDTH-1:0] accumulator_reg;
 
 // Valid pipeline: 9-stage shift register (was 7 before BREG+MREG addition)
 // [0]=BREG done, [1]=MREG done, [2]=L0 done, [3]=L1 done, [4]=L2 done,

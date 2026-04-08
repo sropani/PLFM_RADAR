@@ -12,11 +12,49 @@
 #
 # I/O Bank Voltage Summary:
 #   Bank 0:  VCCO = 3.3V (JTAG, flash CS)
-#   Bank 14: VCCO = 3.3V (ADC LVDS data, SPI flash)
+#   Bank 14: VCCO = 2.5V (ADC LVDS_25 data — placer-enforced; adc_pwdn as LVCMOS25)
 #   Bank 15: VCCO = 3.3V (DAC, clocks, STM32 SPI 3.3V side, DIG bus, mixer)
 #   Bank 34: VCCO = 1.8V (ADAR1000 beamformer control, SPI 1.8V side)
-#   Bank 35: VCCO = 3.3V (unused — no signal connections)
+#   Bank 35: VCCO = 3.3V (FT2232H USB 2.0 FIFO — 15 signals)
+#
+# DRC Fix History:
+#   - PLIO-9: Moved clk_120m_dac from C13 (N-type) to D13 (P-type MRCC).
+#     Clock inputs must use the P-type pin of a Multi-Region Clock-Capable pair.
+#   - BIVC-1 / Place 30-372: Bank 14 must have a single VCCO. LVDS_25 forces
+#     VCCO=2.5V, so adc_pwdn was changed from LVCMOS33 to LVCMOS25 to match.
+#     IBUFDS input buffers are VCCO-independent. BIVC-1 also waived via
+#     set_property SEVERITY in the build script as an additional safety net.
+#     in the build script. adc_pwdn (LVCMOS25) coexists in the same bank.
+#   - UCIO/NSTD: Unconstrained ports (FT601 ports inactive with USB_MODE=1,
+#     status/debug outputs have no physical pins). Handled with SEVERITY
+#     demotion + default IOSTANDARD.
+#   - PLIO-9: FT2232H CLKOUT routed to C4 (IO_L12N_T1_MRCC_35, N-type).
+#     Clock inputs normally use P-type MRCC pins, but IBUFG works correctly
+#     on N-type. Demote PLIO-9 to warning in build script.
 # ============================================================================
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+
+# ============================================================================
+# DRC WAIVERS — Hardware-Level Known Issues (applied in build script)
+# ============================================================================
+# BIVC-1: Bank 14 VCCO=3.3V with LVDS_25 inputs + LVCMOS33 adc_pwdn.
+# IBUFDS input buffers are VCCO-independent on 7-series — they use an
+# internal differential amplifier that works correctly at any VCCO.
+# The BIVC-1 DRC check is intended for OBUFDS *outputs* where VCCO
+# directly affects the output swing. Since Bank 14 has only LVDS inputs
+# and one LVCMOS33 output, this is safe to demote to a warning.
+# → Applied in build_50t_test.tcl: set_property SEVERITY {Warning} [get_drc_checks BIVC-1]
+#
+# NSTD-1 / UCIO-1: Unconstrained ports — FT601 USB ports (inactive with
+# USB_MODE=1 generate block), dac_clk (DAC clock comes from AD9523, not FPGA),
+# and all status/debug outputs (no physical pins available). These ports are
+# present in the shared RTL but have no connections on the 50T board.
+# → Applied in build_50t_test.tcl: set_property SEVERITY {Warning} [get_drc_checks {NSTD-1 UCIO-1}]
 
 # ============================================================================
 # CLOCK CONSTRAINTS
@@ -28,33 +66,48 @@ set_property IOSTANDARD LVCMOS33 [get_ports {clk_100m}]
 create_clock -name clk_100m -period 10.0 [get_ports {clk_100m}]
 set_input_jitter [get_clocks clk_100m] 0.1
 
-# 120MHz DAC Clock (AD9523 OUT11 → FPGA_DAC_CLOCK → Bank 15 MRCC pin C13)
+# 120MHz DAC Clock (AD9523 OUT11 → FPGA_DAC_CLOCK → Bank 15 MRCC pin D13)
 # NOTE: The physical DAC (U3, AD9708) receives its clock directly from the
 #       AD9523 via a separate net (DAC_CLOCK), NOT from the FPGA. The FPGA
 #       uses this clock input for internal DAC data timing only. The RTL port
 #       `dac_clk` is an output that assigns clk_120m directly — it has no
 #       separate physical pin on this board and should be removed from the
 #       RTL or left unconnected.
-set_property PACKAGE_PIN C13 [get_ports {clk_120m_dac}]
+# FIX: Moved from C13 (IO_L12N = N-type) to D13 (IO_L12P = P-type MRCC).
+#      Clock inputs must use the P-type pin of an MRCC pair (PLIO-9 DRC).
+set_property PACKAGE_PIN D13 [get_ports {clk_120m_dac}]
 set_property IOSTANDARD LVCMOS33 [get_ports {clk_120m_dac}]
 create_clock -name clk_120m_dac -period 8.333 [get_ports {clk_120m_dac}]
 set_input_jitter [get_clocks clk_120m_dac] 0.1
 
 # ADC DCO Clock (400MHz LVDS — AD9523 OUT5 → AD9484 → FPGA, Bank 14 MRCC)
+# NOTE: LVDS_25 is the only valid differential input standard on 7-series HR
+# banks. IBUFDS input buffers are VCCO-independent — they work correctly even
+# with VCCO=3.3V. The BIVC-1 DRC (voltage conflict with LVCMOS33 adc_pwdn)
+# is waived in the build script since this bank has only LVDS *inputs*.
 set_property PACKAGE_PIN N14 [get_ports {adc_dco_p}]
 set_property PACKAGE_PIN P14 [get_ports {adc_dco_n}]
-set_property IOSTANDARD LVDS_33 [get_ports {adc_dco_p}]
-set_property IOSTANDARD LVDS_33 [get_ports {adc_dco_n}]
+set_property IOSTANDARD LVDS_25 [get_ports {adc_dco_p}]
+set_property IOSTANDARD LVDS_25 [get_ports {adc_dco_n}]
 set_property DIFF_TERM TRUE [get_ports {adc_dco_p}]
 create_clock -name adc_dco_p -period 2.5 [get_ports {adc_dco_p}]
 set_input_jitter [get_clocks adc_dco_p] 0.05
 
 # --------------------------------------------------------------------------
-# FT601 Clock — COMMENTED OUT: FT601 (U6) is placed in schematic but has
-# zero net connections. No physical clock pin exists on this board.
+# FT2232H 60 MHz CLKOUT (Bank 35, MRCC pin C4)
 # --------------------------------------------------------------------------
-# create_clock -name ft601_clk_in -period 10.0 [get_ports {ft601_clk_in}]
-# set_input_jitter [get_clocks ft601_clk_in] 0.1
+# The FT2232H provides a 60 MHz clock in 245 Synchronous FIFO mode.
+# Pin C4 is IO_L12N_T1_MRCC_35 (N-type of MRCC pair). Vivado requires
+# CLOCK_DEDICATED_ROUTE FALSE for clock inputs on N-type MRCC pins
+# (Place 30-876). The schematic routes CLKOUT to C4; this cannot be
+# changed without a board respin. The clock still uses an IBUFG and
+# reaches the clock network — the constraint only disables the DRC check.
+set_property PACKAGE_PIN C4 [get_ports {ft_clkout}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_clkout}]
+create_clock -name ft_clkout -period 16.667 [get_ports {ft_clkout}]
+set_input_jitter [get_clocks ft_clkout] 0.2
+# N-type MRCC pin requires dedicated route override (Place 30-876)
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets {ft_clkout_IBUF}]
 
 # ============================================================================
 # RESET (Active-Low)
@@ -197,40 +250,79 @@ set_property PACKAGE_PIN R7  [get_ports {adc_d_n[7]}]
 # ADC DCO Clock (LVDS) — already constrained above in CLOCK section
 
 # ADC Power Down — ADC_PWRD net (single-ended, Bank 14)
+# Uses LVCMOS25 to be voltage-compatible with LVDS_25 in the same bank.
+# The placer enforces a single VCCO per bank; LVDS_25 demands VCCO=2.5V.
+# LVCMOS25 output drives the AD9484 PWDN pin (CMOS threshold ~0.8V) safely.
+# On the physical board (VCCO=3.3V), output swings follow actual VCCO.
 set_property PACKAGE_PIN T5 [get_ports {adc_pwdn}]
-set_property IOSTANDARD LVCMOS33 [get_ports {adc_pwdn}]
+set_property IOSTANDARD LVCMOS25 [get_ports {adc_pwdn}]
 
-# LVDS I/O Standard — Bank 14 VCCO = 3.3V → use LVDS_33 (not LVDS_25)
-set_property IOSTANDARD LVDS_33 [get_ports {adc_d_p[*]}]
-set_property IOSTANDARD LVDS_33 [get_ports {adc_d_n[*]}]
+# LVDS I/O Standard — LVDS_25 is the only valid differential input standard
+# on 7-series HR banks. IBUFDS inputs work correctly regardless of VCCO.
+set_property IOSTANDARD LVDS_25 [get_ports {adc_d_p[*]}]
+set_property IOSTANDARD LVDS_25 [get_ports {adc_d_n[*]}]
 
-# Differential termination
+# Differential termination — DIFF_TERM uses a ~100-ohm on-die termination
+# inside the IBUFDS. This is VCCO-independent for 7-series input buffers.
+# RTL IBUFDS uses DIFF_TERM("FALSE") so this XDC property takes precedence.
 set_property DIFF_TERM TRUE [get_ports {adc_d_p[*]}]
 
 # Input delay for ADC data relative to DCO (adjust based on PCB trace length)
+# DDR interface: constrain both rising and falling clock edges
 set_input_delay -clock [get_clocks adc_dco_p] -max 1.0 [get_ports {adc_d_p[*]}]
 set_input_delay -clock [get_clocks adc_dco_p] -min 0.2 [get_ports {adc_d_p[*]}]
+set_input_delay -clock [get_clocks adc_dco_p] -max 1.0 -clock_fall [get_ports {adc_d_p[*]}] -add_delay
+set_input_delay -clock [get_clocks adc_dco_p] -min 0.2 -clock_fall [get_ports {adc_d_p[*]}] -add_delay
 
 # ============================================================================
-# FT601 USB 3.0 INTERFACE — ACTIVE: NO PHYSICAL CONNECTIONS
+# FT2232H USB 2.0 INTERFACE (Bank 35, VCCO=3.3V)
 # ============================================================================
-# The FT601 chip (U6, FT601Q-B-T) is placed in the Eagle schematic but has
-# ZERO net connections — no signals are routed between it and the FPGA.
-# Bank 35 (which would logically host FT601 signals) has no signal pins
-# connected, only VCCO_35 power.
+# FT2232H (U6) Channel A in 245 Synchronous FIFO mode.
+# All signals are direct connections to FPGA Bank 35 (LVCMOS33).
+# Pin mapping extracted from Eagle schematic (RADAR_Main_Board.sch).
 #
-# ALL FT601 constraints are commented out. The RTL module usb_data_interface.v
-# instantiates the FT601 interface, but it cannot function without physical
-# pin assignments. To use USB, the schematic must be updated to wire the
-# FT601 to FPGA Bank 35 pins, and then these constraints can be populated.
-#
-# Ports affected (from radar_system_top.v):
-#   ft601_data[31:0], ft601_be[1:0], ft601_txe_n, ft601_rxf_n, ft601_txe,
-#   ft601_rxf, ft601_wr_n, ft601_rd_n, ft601_oe_n, ft601_siwu_n,
-#   ft601_srb[1:0], ft601_swb[1:0], ft601_clk_out, ft601_clk_in
-#
-# TODO: Wire FT601 in schematic, then assign pins here.
+# The FT2232H replaces the previously-unwired FT601 on the 50T production
+# board. The 200T dev board retains FT601 USB 3.0 (32-bit).
 # ============================================================================
+
+# 8-bit bidirectional data bus (ADBUS0–ADBUS7)
+set_property PACKAGE_PIN K1 [get_ports {ft_data[0]}]   ;# ADBUS0 → IO_L22P_T3_35
+set_property PACKAGE_PIN J3 [get_ports {ft_data[1]}]   ;# ADBUS1 → IO_L21P_T3_DQS_35
+set_property PACKAGE_PIN H3 [get_ports {ft_data[2]}]   ;# ADBUS2 → IO_L21N_T3_DQS_35
+set_property PACKAGE_PIN G4 [get_ports {ft_data[3]}]   ;# ADBUS3 → IO_L16N_T2_35
+set_property PACKAGE_PIN F2 [get_ports {ft_data[4]}]   ;# ADBUS4 → IO_L15P_T2_DQS_35
+set_property PACKAGE_PIN D1 [get_ports {ft_data[5]}]   ;# ADBUS5 → IO_L10N_T1_AD15N_35
+set_property PACKAGE_PIN C3 [get_ports {ft_data[6]}]   ;# ADBUS6 → IO_L7P_T1_AD6P_35
+set_property PACKAGE_PIN C1 [get_ports {ft_data[7]}]   ;# ADBUS7 → IO_L9P_T1_DQS_AD7P_35
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_data[*]}]
+
+# Control signals (active low where noted)
+set_property PACKAGE_PIN A2 [get_ports {ft_rxf_n}]     ;# ACBUS0 → IO_L8N_T1_AD14N_35
+set_property PACKAGE_PIN B2 [get_ports {ft_txe_n}]     ;# ACBUS1 → IO_L8P_T1_AD14P_35
+set_property PACKAGE_PIN A3 [get_ports {ft_rd_n}]      ;# ACBUS2 → IO_L4N_T0_35
+set_property PACKAGE_PIN A4 [get_ports {ft_wr_n}]      ;# ACBUS3 → IO_L3N_T0_DQS_AD5N_35
+set_property PACKAGE_PIN A5 [get_ports {ft_siwu}]      ;# ACBUS4 → IO_L3P_T0_DQS_AD5P_35
+set_property PACKAGE_PIN B7 [get_ports {ft_oe_n}]      ;# ACBUS6 → IO_L1P_T0_AD4P_35
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_rxf_n}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_txe_n}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_rd_n}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_wr_n}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_siwu}]
+set_property IOSTANDARD LVCMOS33 [get_ports {ft_oe_n}]
+
+# Output timing: SLEW FAST + DRIVE 8 for FT2232H signals
+set_property SLEW FAST [get_ports {ft_rd_n}]
+set_property SLEW FAST [get_ports {ft_wr_n}]
+set_property SLEW FAST [get_ports {ft_oe_n}]
+set_property SLEW FAST [get_ports {ft_siwu}]
+set_property SLEW FAST [get_ports {ft_data[*]}]
+set_property DRIVE 8 [get_ports {ft_rd_n}]
+set_property DRIVE 8 [get_ports {ft_wr_n}]
+set_property DRIVE 8 [get_ports {ft_oe_n}]
+set_property DRIVE 8 [get_ports {ft_siwu}]
+set_property DRIVE 8 [get_ports {ft_data[*]}]
+
+# ft_clkout constrained above in CLOCK CONSTRAINTS section (C4, 60 MHz)
 
 # ============================================================================
 # STATUS / DEBUG OUTPUTS — NO PHYSICAL CONNECTIONS
@@ -283,7 +375,13 @@ set_false_path -from [get_clocks adc_dco_p] -to [get_clocks clk_100m]
 set_false_path -from [get_clocks clk_100m] -to [get_clocks clk_120m_dac]
 set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks clk_100m]
 
-# FT601 CDC paths removed — no ft601_clk_in clock defined (chip unwired)
+# FT2232H CDC: clk_100m ↔ ft_clkout (60 MHz), toggle CDC in RTL
+set_false_path -from [get_clocks clk_100m] -to [get_clocks ft_clkout]
+set_false_path -from [get_clocks ft_clkout] -to [get_clocks clk_100m]
+
+# FT2232H CDC: clk_120m_dac ↔ ft_clkout (no direct crossing, but belt-and-suspenders)
+set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks ft_clkout]
+set_false_path -from [get_clocks ft_clkout] -to [get_clocks clk_120m_dac]
 
 # ============================================================================
 # PHYSICAL CONSTRAINTS

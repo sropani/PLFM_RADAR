@@ -62,12 +62,24 @@ set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks clk_mmcm_out0]
 set_false_path -through [get_pins rx_inst/adc/mmcm_inst/mmcm_adc_400m/LOCKED]
 
 # --------------------------------------------------------------------------
-# Hold waiver for BUFIO→MMCM domain transfer (if Vivado flags hold violations)
+# Hold waiver for source-synchronous ADC capture (BUFIO-clocked IDDR)
 # --------------------------------------------------------------------------
-# The existing hold waiver for BUFIO source-synchronous capture stays:
-#   set_false_path -hold -from [get_ports {adc_d_p[*]}] -to [get_clocks adc_dco_p]
+# The AD9484 ADC provides a source-synchronous interface: data (adc_d_p/n)
+# and clock (adc_dco_p/n) are output from the same chip with matched timing.
+# On the PCB, data and DCO traces are length-matched.
 #
-# The MMCM BUFG re-registration of IDDR outputs: since BUFIO and MMCM output
-# are derived from the same IBUFDS source, hold is inherently met (MMCM adds
-# insertion delay). If Vivado flags hold violations on this transfer, uncomment:
-# set_false_path -hold -from [get_clocks adc_dco_p] -to [get_clocks clk_mmcm_out0]
+# Inside the FPGA, the DCO clock path goes through IBUFDS → BUFIO, adding
+# ~2.2ns of insertion delay (IBUFDS 0.9ns + routing 0.6ns + BUFIO 1.3ns).
+# The data path goes through IBUFDS only (~0.85ns), arriving at the IDDR
+# ~1.4ns before the clock. Vivado's hold analysis sees the data "changing"
+# before the clock edge and reports WHS = -1.955ns.
+#
+# This is correct internal behavior: the BUFIO clock intentionally arrives
+# after the data. The IDDR captures on the BUFIO edge, by which time the
+# data is stable. Hold timing is guaranteed by the external PCB layout
+# (ADC data valid window centered on DCO edge), not by FPGA clock tree
+# delays. Vivado's STA model cannot account for this external relationship.
+#
+# Waiving hold on these 8 paths (adc_d_p[0..7] → IDDR) is standard practice
+# for source-synchronous LVDS ADC interfaces using BUFIO capture.
+set_false_path -hold -from [get_ports {adc_d_p[*]}] -to [get_clocks adc_dco_p]

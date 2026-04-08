@@ -20,12 +20,16 @@ wire [7:0] adc_data;
 wire adc_dco;
 
 // IBUFDS for each data bit
+// NOTE: IOSTANDARD and DIFF_TERM are set via XDC constraints, not RTL
+// parameters, to support multiple FPGA targets with different bank voltages:
+//   - XC7A200T (FBG484): Bank 14 VCCO = 2.5V → LVDS_25
+//   - XC7A50T  (FTG256): Bank 14 VCCO = 3.3V → LVDS_33
 genvar i;
 generate
     for (i = 0; i < 8; i = i + 1) begin : data_buffers
         IBUFDS #(
-            .DIFF_TERM("TRUE"),
-            .IOSTANDARD("LVDS_25")
+            .DIFF_TERM("FALSE"),    // Overridden by XDC DIFF_TERM property
+            .IOSTANDARD("DEFAULT")  // Overridden by XDC IOSTANDARD property
         ) ibufds_data (
             .O(adc_data[i]),
             .I(adc_d_p[i]),
@@ -36,8 +40,8 @@ endgenerate
 
 // IBUFDS for DCO
 IBUFDS #(
-    .DIFF_TERM("TRUE"),
-    .IOSTANDARD("LVDS_25") 
+    .DIFF_TERM("FALSE"),    // Overridden by XDC DIFF_TERM property
+    .IOSTANDARD("DEFAULT")  // Overridden by XDC IOSTANDARD property
 ) ibufds_dco (
     .O(adc_dco),
     .I(adc_dco_p),

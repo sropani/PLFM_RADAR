@@ -7,12 +7,16 @@
  * Integrates:
  * - Radar Transmitter (PLFM chirp generation)
  * - Radar Receiver (ADC interface, DDC, matched filtering, Doppler processing)
- * - USB Data Interface (FT601 for high-speed data transfer)
+ * - USB Data Interface (FT601 USB 3.0 or FT2232H USB 2.0, selected by USB_MODE)
  * 
  * Clock domains:
  * - clk_100m: System clock (100MHz)
  * - clk_120m_dac: DAC clock (120MHz)
- * - ft601_clk: FT601 interface clock (100MHz from FT601)
+ * - ft601_clk: USB interface clock (100MHz FT601 or 60MHz FT2232H)
+ *
+ * USB_MODE parameter:
+ *   0 = FT601 (32-bit, USB 3.0) — 200T premium board
+ *   1 = FT2232H (8-bit, USB 2.0) — 50T production board
  */
 
 module radar_system_top (
@@ -93,9 +97,19 @@ module radar_system_top (
     input wire [1:0] ft601_srb,              // Selected read buffer
     input wire [1:0] ft601_swb,               // Selected write buffer
     
-    // Clock output (optional)
+    // Clock output (optional, FT601 only — not used for FT2232H)
     output wire ft601_clk_out,
     
+    // ========== FT2232H USB 2.0 INTERFACE (USB_MODE=1) ==========
+    // 8-bit bidirectional data bus (245 Synchronous FIFO mode, Channel A)
+    inout wire [7:0] ft_data,            // 8-bit bidirectional data bus
+    input wire ft_rxf_n,                  // RX FIFO not empty (active low)
+    input wire ft_txe_n,                  // TX FIFO not full (active low)
+    output wire ft_rd_n,                  // Read strobe (active low)
+    output wire ft_wr_n,                  // Write strobe (active low)
+    output wire ft_oe_n,                  // Output enable / bus direction
+    output wire ft_siwu,                  // Send Immediate / WakeUp
+
     // ========== STATUS OUTPUTS ==========
     
     // Beam position tracking
@@ -122,6 +136,7 @@ module radar_system_top (
 parameter USE_LONG_CHIRP = 1'b1;          // Default to long chirp
 parameter DOPPLER_ENABLE = 1'b1;           // Enable Doppler processing
 parameter USB_ENABLE = 1'b1;               // Enable USB data transfer
+parameter USB_MODE = 0;                    // 0=FT601 (32-bit, 200T), 1=FT2232H (8-bit, 50T)
 
 // ============================================================================
 // INTERNAL SIGNALS
@@ -217,10 +232,11 @@ reg [5:0]  host_chirps_per_elev;      // Opcode 0x15 (default 32)
 reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 
 // Fix 4: Doppler/chirps mismatch protection
-// DOPPLER_FFT_SIZE is compile-time (32). If host sets chirps_per_elev to a
+// DOPPLER_FRAME_CHIRPS is the fixed chirp count expected by the staggered-PRI
+// Doppler path (16 long + 16 short). If host sets chirps_per_elev to a
 // different value, Doppler accumulation is corrupted. Clamp at command decode
 // and flag the mismatch so the host knows.
-localparam DOPPLER_FFT_SIZE = 32;     // Must match doppler_processor parameter
+localparam DOPPLER_FRAME_CHIRPS = 32; // Total chirps per Doppler frame
 reg        chirps_mismatch_error;     // Set if host tried to set chirps != FFT size
 
 // Fix 7: Range-mode register (opcode 0x20)
@@ -532,16 +548,21 @@ assign rx_doppler_data_valid = rx_doppler_valid;
 // ============================================================================
 // DC NOTCH FILTER (post-Doppler-FFT, pre-CFAR)
 // ============================================================================
-// Zeros out Doppler bins within ±host_dc_notch_width of DC (bin 0).
-// In a 32-point FFT, DC is bin 0; negative Doppler wraps to bins 31,30,...
-// notch_width=1 → zero bins {0}. notch_width=2 → zero bins {0,1,31}. etc.
+// Zeros out Doppler bins within ±host_dc_notch_width of DC for BOTH
+// sub-frames in the dual 16-pt FFT architecture.
+// doppler_bin[4:0] = {sub_frame, bin[3:0]}:
+//   Sub-frame 0: bins 0-15,  DC = bin 0,  wrap = bin 15
+//   Sub-frame 1: bins 16-31, DC = bin 16, wrap = bin 31
+// notch_width=1 → zero bins {0,16}. notch_width=2 → zero bins
+// {0,1,15,16,17,31}. etc.
 // When host_dc_notch_width=0: pass-through (no zeroing).
 
 wire dc_notch_active;
 wire [4:0] dop_bin_unsigned = rx_doppler_bin;
+wire [3:0] bin_within_sf = dop_bin_unsigned[3:0];
 assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
-                          (dop_bin_unsigned < {2'b0, host_dc_notch_width} ||
-                           dop_bin_unsigned > (5'd31 - {2'b0, host_dc_notch_width} + 5'd1));
+                          (bin_within_sf < {1'b0, host_dc_notch_width} ||
+                           bin_within_sf > (4'd15 - {1'b0, host_dc_notch_width} + 4'd1));
 
 // Notched Doppler data: zero I/Q when in notch zone, pass through otherwise
 wire [31:0] notched_doppler_data  = dc_notch_active ? 32'd0 : rx_doppler_output;
@@ -661,67 +682,143 @@ assign usb_detect_flag  = rx_detect_flag;
 assign usb_detect_valid = rx_detect_valid;
 
 // ============================================================================
-// USB DATA INTERFACE INSTANTIATION
+// USB DATA INTERFACE INSTANTIATION (parametric: FT601 or FT2232H)
 // ============================================================================
 
-usb_data_interface usb_inst (
-    .clk(clk_100m_buf),
-    .reset_n(sys_reset_n),
-    .ft601_reset_n(sys_reset_ft601_n),  // FT601-domain synchronized reset
-    
-    // Radar data inputs
-    .range_profile(usb_range_profile),
-    .range_valid(usb_range_valid),
-    .doppler_real(usb_doppler_real),
-    .doppler_imag(usb_doppler_imag),
-    .doppler_valid(usb_doppler_valid),
-    .cfar_detection(usb_detect_flag),
-    .cfar_valid(usb_detect_valid),
-    
-    // FT601 Interface
-    .ft601_data(ft601_data),
-    .ft601_be(ft601_be),
-    .ft601_txe_n(ft601_txe_n),
-    .ft601_rxf_n(ft601_rxf_n),
-    .ft601_txe(ft601_txe),
-    .ft601_rxf(ft601_rxf),
-    .ft601_wr_n(ft601_wr_n),
-    .ft601_rd_n(ft601_rd_n),
-    .ft601_oe_n(ft601_oe_n),
-    .ft601_siwu_n(ft601_siwu_n),
-    .ft601_srb(ft601_srb),
-    .ft601_swb(ft601_swb),
-    .ft601_clk_out(ft601_clk_out),
-    .ft601_clk_in(ft601_clk_buf),
-    
-    // Host command outputs (Gap 4: USB Read Path)
-    .cmd_data(usb_cmd_data),
-    .cmd_valid(usb_cmd_valid),
-    .cmd_opcode(usb_cmd_opcode),
-    .cmd_addr(usb_cmd_addr),
-    .cmd_value(usb_cmd_value),
+generate
+if (USB_MODE == 0) begin : gen_ft601
+    // ---- FT601 USB 3.0 (32-bit, 200T premium board) ----
+    usb_data_interface usb_inst (
+        .clk(clk_100m_buf),
+        .reset_n(sys_reset_n),
+        .ft601_reset_n(sys_reset_ft601_n),
+        
+        // Radar data inputs
+        .range_profile(usb_range_profile),
+        .range_valid(usb_range_valid),
+        .doppler_real(usb_doppler_real),
+        .doppler_imag(usb_doppler_imag),
+        .doppler_valid(usb_doppler_valid),
+        .cfar_detection(usb_detect_flag),
+        .cfar_valid(usb_detect_valid),
+        
+        // FT601 Interface
+        .ft601_data(ft601_data),
+        .ft601_be(ft601_be),
+        .ft601_txe_n(ft601_txe_n),
+        .ft601_rxf_n(ft601_rxf_n),
+        .ft601_txe(ft601_txe),
+        .ft601_rxf(ft601_rxf),
+        .ft601_wr_n(ft601_wr_n),
+        .ft601_rd_n(ft601_rd_n),
+        .ft601_oe_n(ft601_oe_n),
+        .ft601_siwu_n(ft601_siwu_n),
+        .ft601_srb(ft601_srb),
+        .ft601_swb(ft601_swb),
+        .ft601_clk_out(ft601_clk_out),
+        .ft601_clk_in(ft601_clk_buf),
+        
+        // Host command outputs
+        .cmd_data(usb_cmd_data),
+        .cmd_valid(usb_cmd_valid),
+        .cmd_opcode(usb_cmd_opcode),
+        .cmd_addr(usb_cmd_addr),
+        .cmd_value(usb_cmd_value),
 
-    // Gap 2: Stream control (clk_100m domain, CDC'd inside usb_data_interface)
-    .stream_control(host_stream_control),
+        // Stream control
+        .stream_control(host_stream_control),
 
-    // Gap 2: Status readback inputs
-    .status_request(host_status_request),
-    .status_cfar_threshold(host_detect_threshold),
-    .status_stream_ctrl(host_stream_control),
-    .status_radar_mode(host_radar_mode),
-    .status_long_chirp(host_long_chirp_cycles),
-    .status_long_listen(host_long_listen_cycles),
-    .status_guard(host_guard_cycles),
-    .status_short_chirp(host_short_chirp_cycles),
-    .status_short_listen(host_short_listen_cycles),
-    .status_chirps_per_elev(host_chirps_per_elev),
-    .status_range_mode(host_range_mode),
+        // Status readback inputs
+        .status_request(host_status_request),
+        .status_cfar_threshold(host_detect_threshold),
+        .status_stream_ctrl(host_stream_control),
+        .status_radar_mode(host_radar_mode),
+        .status_long_chirp(host_long_chirp_cycles),
+        .status_long_listen(host_long_listen_cycles),
+        .status_guard(host_guard_cycles),
+        .status_short_chirp(host_short_chirp_cycles),
+        .status_short_listen(host_short_listen_cycles),
+        .status_chirps_per_elev(host_chirps_per_elev),
+        .status_range_mode(host_range_mode),
 
-    // Self-test status readback
-    .status_self_test_flags(self_test_flags_latched),
-    .status_self_test_detail(self_test_detail_latched),
-    .status_self_test_busy(self_test_busy)
-);
+        // Self-test status readback
+        .status_self_test_flags(self_test_flags_latched),
+        .status_self_test_detail(self_test_detail_latched),
+        .status_self_test_busy(self_test_busy)
+    );
+
+    // FT2232H ports unused in FT601 mode — tie off
+    assign ft_rd_n = 1'b1;
+    assign ft_wr_n = 1'b1;
+    assign ft_oe_n = 1'b1;
+    assign ft_siwu = 1'b0;
+
+end else begin : gen_ft2232h
+    // ---- FT2232H USB 2.0 (8-bit, 50T production board) ----
+    usb_data_interface_ft2232h usb_inst (
+        .clk(clk_100m_buf),
+        .reset_n(sys_reset_n),
+        .ft_reset_n(sys_reset_ft601_n),  // Reuse same synchronized reset
+        
+        // Radar data inputs
+        .range_profile(usb_range_profile),
+        .range_valid(usb_range_valid),
+        .doppler_real(usb_doppler_real),
+        .doppler_imag(usb_doppler_imag),
+        .doppler_valid(usb_doppler_valid),
+        .cfar_detection(usb_detect_flag),
+        .cfar_valid(usb_detect_valid),
+
+        // FT2232H Interface
+        .ft_data(ft_data),
+        .ft_rxf_n(ft_rxf_n),
+        .ft_txe_n(ft_txe_n),
+        .ft_rd_n(ft_rd_n),
+        .ft_wr_n(ft_wr_n),
+        .ft_oe_n(ft_oe_n),
+        .ft_siwu(ft_siwu),
+        .ft_clk(ft601_clk_buf),   // Reuse BUFG'd USB clock
+
+        // Host command outputs
+        .cmd_data(usb_cmd_data),
+        .cmd_valid(usb_cmd_valid),
+        .cmd_opcode(usb_cmd_opcode),
+        .cmd_addr(usb_cmd_addr),
+        .cmd_value(usb_cmd_value),
+
+        // Stream control
+        .stream_control(host_stream_control),
+
+        // Status readback inputs
+        .status_request(host_status_request),
+        .status_cfar_threshold(host_detect_threshold),
+        .status_stream_ctrl(host_stream_control),
+        .status_radar_mode(host_radar_mode),
+        .status_long_chirp(host_long_chirp_cycles),
+        .status_long_listen(host_long_listen_cycles),
+        .status_guard(host_guard_cycles),
+        .status_short_chirp(host_short_chirp_cycles),
+        .status_short_listen(host_short_listen_cycles),
+        .status_chirps_per_elev(host_chirps_per_elev),
+        .status_range_mode(host_range_mode),
+
+        // Self-test status readback
+        .status_self_test_flags(self_test_flags_latched),
+        .status_self_test_detail(self_test_detail_latched),
+        .status_self_test_busy(self_test_busy)
+    );
+
+    // FT601 ports unused in FT2232H mode — tie off
+    assign ft601_be     = 4'b0000;
+    assign ft601_txe_n  = 1'b1;
+    assign ft601_rxf_n  = 1'b1;
+    assign ft601_wr_n   = 1'b1;
+    assign ft601_rd_n   = 1'b1;
+    assign ft601_oe_n   = 1'b1;
+    assign ft601_siwu_n = 1'b1;
+    assign ft601_clk_out = 1'b0;
+end
+endgenerate
 
 // ============================================================================
 // USB COMMAND CDC: ft601_clk → clk_100m (Gap 4: USB Read Path)
@@ -814,18 +911,18 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
                 8'h13: host_short_chirp_cycles <= usb_cmd_value;
                 8'h14: host_short_listen_cycles <= usb_cmd_value;
                 8'h15: begin
-                    // Fix 4: Clamp chirps_per_elev to DOPPLER_FFT_SIZE.
+                    // Fix 4: Clamp chirps_per_elev to the fixed Doppler frame size.
                     // If host requests a different value, clamp and set error flag.
-                    if (usb_cmd_value[5:0] > DOPPLER_FFT_SIZE[5:0]) begin
-                        host_chirps_per_elev  <= DOPPLER_FFT_SIZE[5:0];
+                    if (usb_cmd_value[5:0] > DOPPLER_FRAME_CHIRPS[5:0]) begin
+                        host_chirps_per_elev  <= DOPPLER_FRAME_CHIRPS[5:0];
                         chirps_mismatch_error <= 1'b1;
                     end else if (usb_cmd_value[5:0] == 6'd0) begin
-                        host_chirps_per_elev  <= DOPPLER_FFT_SIZE[5:0];
+                        host_chirps_per_elev  <= DOPPLER_FRAME_CHIRPS[5:0];
                         chirps_mismatch_error <= 1'b1;
                     end else begin
                         host_chirps_per_elev  <= usb_cmd_value[5:0];
                         // Clear error only if value matches FFT size exactly
-                        chirps_mismatch_error <= (usb_cmd_value[5:0] != DOPPLER_FFT_SIZE[5:0]);
+                        chirps_mismatch_error <= (usb_cmd_value[5:0] != DOPPLER_FRAME_CHIRPS[5:0]);
                     end
                 end
                 8'h16: host_gain_shift         <= usb_cmd_value[3:0];  // Fix 3: digital gain
